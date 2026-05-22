@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Environment variables
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+.env.*.local
+.env.supabase
+*.env
+
+# Mantém apenas o template
+!.env.example
+
+# Credenciais e secrets diversos
+*.pem
+*.key
+secrets.json
+credentials.json
+config.local.json
+
+# Arquivo local de rotação de credenciais — não commitar
+ROTATION_CHECKLIST.md
+
+# Claude Code (per-user, contém access tokens em permissões)
+.claude/settings.local.json
+
+# Supabase local CLI state
+supabase/.branches/
+supabase/.temp/
