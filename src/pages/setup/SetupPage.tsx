@@ -18,6 +18,8 @@ type Step2Values = {
   owner_password: string;
 };
 
+type BootstrapPhase = "idle" | "bootstrapping" | "waiting-redeploy" | "ready";
+
 const emptyStep2: Step2Values = {
   supabase_url: "",
   supabase_anon_key: "",
@@ -187,6 +189,30 @@ async function validateStep2Field(name: keyof Step2Values, values: Step2Values) 
   }
 }
 
+function wait(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function waitForHealth(timeoutMs = 300000, intervalMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${window.location.origin}/api/health`, {
+        cache: "no-store",
+      });
+      if (res.ok) return;
+    } catch {
+      // O deployment pode estar trocando de versão. Tenta novamente até o timeout.
+    }
+    await wait(intervalMs);
+  }
+  throw new Error(
+    "Aguardamos 5 minutos e a aplicação ainda não reiniciou com as novas envs. Verifique manualmente em vercel.com/dashboard e tente acessar /setup?step=4 novamente."
+  );
+}
+
 export function SetupPage() {
   const initialStep = new URLSearchParams(window.location.search).get("step") === "4" ? 4 : 1;
   const [step, setStep] = useState(initialStep);
@@ -198,7 +224,9 @@ export function SetupPage() {
   const [showOwnerPassword, setShowOwnerPassword] = useState(false);
   const [bootstrapBusy, setBootstrapBusy] = useState(false);
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [bootstrapPhase, setBootstrapPhase] = useState<BootstrapPhase>("idle");
   const [completedBootstrapSteps, setCompletedBootstrapSteps] = useState<string[]>([]);
+  const [deploymentUrl, setDeploymentUrl] = useState("");
   const [appValues, setAppValues] = useState<Record<string, string | null>>({});
   const [appValidity, setAppValidity] = useState<Record<string, boolean>>({});
   const [savingApps, setSavingApps] = useState(false);
@@ -274,6 +302,8 @@ export function SetupPage() {
     setStep(3);
     setBootstrapBusy(true);
     setBootstrapError(null);
+    setBootstrapPhase("bootstrapping");
+    setDeploymentUrl("");
     try {
       const res = await fetch("/api/bootstrap", {
         method: "POST",
@@ -285,6 +315,16 @@ export function SetupPage() {
         throw new Error(data.message ?? "Falha no bootstrap");
       }
       setCompletedBootstrapSteps(data.steps_completed ?? []);
+      if (data.deployment_url) {
+        setDeploymentUrl(
+          String(data.deployment_url).startsWith("http")
+            ? String(data.deployment_url)
+            : `https://${data.deployment_url}`
+        );
+      }
+      setBootstrapPhase("waiting-redeploy");
+      await waitForHealth();
+      setBootstrapPhase("ready");
 
       // Tenta autenticar o owner recém-criado enquanto a senha ainda está em memória.
       // Só faz sentido se este build já tem as envs (re-execução / dev local). Na
@@ -307,6 +347,7 @@ export function SetupPage() {
       window.location.href = "/setup?step=4";
     } catch (err) {
       setBootstrapError(err instanceof Error ? err.message : "Falha no bootstrap");
+      setBootstrapPhase("idle");
     } finally {
       setBootstrapBusy(false);
     }
@@ -478,6 +519,7 @@ export function SetupPage() {
       "Disparando redeploy",
       "Aguardando aplicação reiniciar",
     ];
+    const vercelHref = deploymentUrl || "https://vercel.com/dashboard";
     return (
       <SetupShell step={3}>
         <h1 className="mb-2 text-[28px] font-semibold text-[#F8FAFC]">Bootstrap em execução</h1>
@@ -486,18 +528,54 @@ export function SetupPage() {
         </p>
         <div className="grid gap-3">
           {timeline.map((item, index) => {
-            const done = index < completedBootstrapSteps.length || (!bootstrapBusy && !bootstrapError && completedBootstrapSteps.length > 0);
+            const isWaitingRestart = index === timeline.length - 1;
+            const done = isWaitingRestart
+              ? bootstrapPhase === "ready"
+              : index < completedBootstrapSteps.length ||
+                (bootstrapPhase !== "bootstrapping" && completedBootstrapSteps.length > 0);
+            const active =
+              !done &&
+              bootstrapBusy &&
+              ((isWaitingRestart && bootstrapPhase === "waiting-redeploy") ||
+                (!isWaitingRestart && bootstrapPhase === "bootstrapping"));
             return (
               <div key={item} className="flex items-center gap-3 rounded-xl border border-[rgba(59,130,246,0.12)] bg-[rgba(255,255,255,0.02)] p-4">
-                {done ? <Check className="h-5 w-5 text-[#10B981]" /> : <Loader2 className="h-5 w-5 animate-spin text-[#60A5FA]" />}
-                <span className="text-sm text-[#CBD5E1]">{item}</span>
+                {done ? (
+                  <Check className="h-5 w-5 text-[#10B981]" />
+                ) : active ? (
+                  <Loader2 className="h-5 w-5 animate-spin text-[#60A5FA]" />
+                ) : (
+                  <div className="h-5 w-5 rounded-full border border-[rgba(96,165,250,0.35)]" />
+                )}
+                <span className="text-sm text-[#CBD5E1]">
+                  {isWaitingRestart && bootstrapPhase === "waiting-redeploy"
+                    ? "Aguardando aplicação reiniciar..."
+                    : item}
+                </span>
               </div>
             );
           })}
         </div>
+        {bootstrapPhase === "waiting-redeploy" && (
+          <div className="mt-5 rounded-xl border border-[rgba(59,130,246,0.3)] bg-[rgba(30,58,138,0.25)] p-4 text-sm leading-6 text-[#CBD5E1]">
+            O redeploy já foi disparado. O wizard vai avançar automaticamente quando
+            a nova versão responder com as envs ativas.
+          </div>
+        )}
         {bootstrapError && (
           <div className="mt-5 rounded-xl border border-[#EF4444]/40 bg-[#EF4444]/10 p-4 text-sm text-[#EF4444]">
             {bootstrapError}
+            {bootstrapError.includes("vercel.com/dashboard") && (
+              <a
+                href={vercelHref}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-3 flex w-fit items-center gap-1 text-[#60A5FA] transition-colors hover:text-[#85B7EB]"
+              >
+                Abrir Vercel
+                <ExternalLink className="h-3.5 w-3.5" />
+              </a>
+            )}
           </div>
         )}
         <div className="mt-8 flex justify-end">
