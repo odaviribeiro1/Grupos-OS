@@ -118,20 +118,46 @@ function readFunctionSource(slug: string) {
   return readFileSync(join(ROOT, "supabase", "functions", slug, "index.ts"), "utf8");
 }
 
+// Arquivos compartilhados (supabase/functions/_shared/*.ts). São enviados junto de
+// cada função no deploy multipart para que os imports relativos `../_shared/...`
+// resolvam no runtime do Deno — preserva o mesmo layout de pastas do código-fonte.
+function listSharedFiles() {
+  const dir = join(ROOT, "supabase", "functions", "_shared");
+  let files: string[] = [];
+  try {
+    files = readdirSync(dir).filter((name) => name.endsWith(".ts"));
+  } catch {
+    files = [];
+  }
+  return files.map((file) => ({
+    path: `_shared/${file}`,
+    source: readFileSync(join(dir, file), "utf8"),
+  }));
+}
+
+// Deploy via multipart/form-data no endpoint atual (/functions/deploy?slug=...).
+// O endpoint legado (POST/PATCH /functions com body application/typescript) foi
+// descontinuado e não suporta múltiplos arquivos. Upsert idempotente por slug:
+// envia index.ts como entrypoint (sob <slug>/index.ts) + os módulos _shared, para
+// que `../_shared/...` resolva igual ao layout local.
 async function deployFunction(ref: string, pat: string, slug: string) {
-  const body = JSON.stringify({
-    name: slug,
-    slug,
-    body: readFunctionSource(slug),
-    verify_jwt: false,
-  });
-  const base = `https://api.supabase.com/v1/projects/${ref}/functions`;
-  const get = await fetch(`${base}/${slug}`, { headers: { Authorization: `Bearer ${pat}` } });
-  const res = await fetch(get.status === 404 ? base : `${base}/${slug}`, {
-    method: get.status === 404 ? "POST" : "PATCH",
-    headers: { Authorization: `Bearer ${pat}`, "Content-Type": "application/json" },
-    body,
-  });
+  const entrypoint = `${slug}/index.ts`;
+  const form = new FormData();
+  form.append(
+    "metadata",
+    new Blob(
+      [JSON.stringify({ name: slug, entrypoint_path: entrypoint, verify_jwt: false })],
+      { type: "application/json" }
+    )
+  );
+  form.append("file", new Blob([readFunctionSource(slug)], { type: "application/typescript" }), entrypoint);
+  for (const shared of listSharedFiles()) {
+    form.append("file", new Blob([shared.source], { type: "application/typescript" }), shared.path);
+  }
+  const res = await fetch(
+    `https://api.supabase.com/v1/projects/${ref}/functions/deploy?slug=${encodeURIComponent(slug)}`,
+    { method: "POST", headers: { Authorization: `Bearer ${pat}` }, body: form }
+  );
   const text = await res.text();
   if (!res.ok) throw new Error(`Deploy da Edge Function ${slug} falhou (${res.status}): ${text}`);
 }
@@ -212,9 +238,37 @@ async function createOwner(body: Required<Pick<BootstrapBody,
   return { userId, sql };
 }
 
+// Resolve o projeto Vercel pelo repositório Git conectado, usando as envs que a
+// Vercel injeta no runtime da function. Mais robusto que casar pelo domínio quando
+// a URL é um alias de produção gerado (ex.: app-lemon-alpha.vercel.app), em que a
+// busca por nome do projeto não retorna nada.
+async function findVercelProjectIdByGitRepo(token: string): Promise<string | null> {
+  const repoId = process.env.VERCEL_GIT_REPO_ID;
+  const owner = process.env.VERCEL_GIT_REPO_OWNER;
+  const slug = process.env.VERCEL_GIT_REPO_SLUG;
+  if (!repoId && !(owner && slug)) return null;
+  const res = await fetch("https://api.vercel.com/v9/projects?limit=100", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) return null;
+  const data = JSON.parse(await res.text()) as {
+    projects?: Array<{ id: string; link?: { repoId?: number | string; repo?: string } }>;
+  };
+  const ownerSlug = owner && slug ? `${owner}/${slug}` : "";
+  for (const project of data.projects ?? []) {
+    const link = project.link;
+    if (!link) continue;
+    if (repoId && link.repoId != null && String(link.repoId) === String(repoId)) return project.id;
+    if (link.repo && (link.repo === ownerSlug || link.repo === slug)) return project.id;
+  }
+  return null;
+}
+
 async function findVercelProjectId(token: string, req: VercelRequest, explicit?: string) {
   if (explicit) return explicit;
   if (process.env.VERCEL_PROJECT_ID) return process.env.VERCEL_PROJECT_ID;
+  const byRepo = await findVercelProjectIdByGitRepo(token);
+  if (byRepo) return byRepo;
   const host = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "").split(":")[0];
   if (!host) throw new Error("Não foi possível identificar o projeto Vercel atual");
   const res = await fetch(`https://api.vercel.com/v9/projects?search=${encodeURIComponent(host)}`, {
@@ -309,17 +363,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       stepsCompleted.push("postgrest_configured");
     }
 
-    if (!(await hasStep(ref, body.supabase_pat!, "edge_functions_deployed"))) {
-      await setSupabaseSecrets(ref, body.supabase_pat!, {
-        SUPABASE_URL: body.supabase_url!,
-        SUPABASE_SERVICE_ROLE_KEY: body.supabase_service_role_key!,
-        CRYPTO_KEY: cryptoKey,
-      });
-      const slugs = listFunctionSlugs();
-      for (const slug of slugs) await deployFunction(ref, body.supabase_pat!, slug);
-      await markStep(ref, body.supabase_pat!, "edge_functions_deployed", { count: slugs.length });
-      stepsCompleted.push("edge_functions_deployed");
+    // Fix 8: sempre re-deploya as Edge Functions (upsert idempotente por slug) para
+    // propagar mudanças de código no re-run — sem pular pelo step já marcado.
+    await setSupabaseSecrets(ref, body.supabase_pat!, {
+      SUPABASE_URL: body.supabase_url!,
+      SUPABASE_SERVICE_ROLE_KEY: body.supabase_service_role_key!,
+      CRYPTO_KEY: cryptoKey,
+    });
+    const slugs = listFunctionSlugs();
+    const functionFailures: string[] = [];
+    for (const slug of slugs) {
+      try {
+        await deployFunction(ref, body.supabase_pat!, slug);
+      } catch (err) {
+        functionFailures.push(`${slug}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
+    // Fix 7: reporta todas as funções que falharam de uma vez. Como o deploy é
+    // idempotente, o retry recomeça e re-deploya tudo de onde parou.
+    if (functionFailures.length > 0) {
+      throw new Error(`Falha ao deployar Edge Functions: ${functionFailures.join("; ")}`);
+    }
+    await markStep(ref, body.supabase_pat!, "edge_functions_deployed", { count: slugs.length });
+    stepsCompleted.push("edge_functions_deployed");
 
     if (!(await hasStep(ref, body.supabase_pat!, "owner_created"))) {
       const owner = await createOwner({
