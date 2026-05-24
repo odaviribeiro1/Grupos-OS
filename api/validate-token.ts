@@ -50,15 +50,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (!supabase_url || !SUPABASE_URL_RE.test(supabase_url.trim())) {
           return res.status(400).json({ valid: false, message: "URL Supabase válida necessária" });
         }
-        // Apenas o header `apikey`. NÃO enviar `Authorization: Bearer <chave>`: as
-        // novas chaves Supabase (sb_publishable_.../sb_secret_...) não são JWT, e um
-        // Bearer não-JWT faz o gateway responder 401 mesmo com a chave correta —
-        // marcando uma chave válida como inválida. As chaves legadas (JWT) também
-        // funcionam só com `apikey`. O gateway rejeita chave inválida com 401;
-        // qualquer outra resposta significa que a chave foi aceita.
-        const r = await fetch(`${supabase_url.trim()}/rest/v1/`, {
-          headers: { apikey: value },
-        });
+        const baseUrl = supabase_url.trim();
+        // Só o header `apikey` (sem `Authorization: Bearer`, que quebraria chaves
+        // novas não-JWT). Endpoint por tipo: o root do PostgREST (/rest/v1/) é
+        // service_role-only — a anon recebe 401 ali ("Only the service_role API key
+        // can be used for this endpoint"). Por isso validamos a anon em
+        // /auth/v1/settings (qualquer chave válida → 200; inválida → 401) e mantemos
+        // /rest/v1/ para a service_role (só ela passa → rejeita anon no campo errado).
+        const probe =
+          type === "supabase_service_role_key"
+            ? `${baseUrl}/rest/v1/`
+            : `${baseUrl}/auth/v1/settings`;
+        const r = await fetch(probe, { headers: { apikey: value } });
         valid = r.status !== 401;
         if (!valid) message = "Chave Supabase inválida ou sem permissão";
         break;
