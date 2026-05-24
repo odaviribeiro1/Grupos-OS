@@ -18,30 +18,6 @@ function json(body: unknown, status = 200) {
   });
 }
 
-async function sendInviteEmail(
-  resendKey: string,
-  from: string,
-  to: string,
-  inviteUrl: string
-) {
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${resendKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from,
-      to,
-      subject: "Você foi convidado para o GrupOS",
-      html: `<p>Você foi convidado para esta instância do GrupOS.</p>
-        <p>Clique no link abaixo para criar sua conta (válido por 7 dias):</p>
-        <p><a href="${inviteUrl}">${inviteUrl}</a></p>`,
-    }),
-  });
-  return res.ok;
-}
-
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -95,44 +71,55 @@ Deno.serve(async (req) => {
     return json({ error: "Role inválido (apenas 'member' ou 'editor')" }, 400);
   }
 
-  // Gerar token criptográfico (32 bytes hex = 64 chars)
-  const tokenBytes = new Uint8Array(32);
-  crypto.getRandomValues(tokenBytes);
-  const inviteToken = Array.from(tokenBytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-
-  const { data: invite, error: insertErr } = await supabase
-    .from("invites")
-    .insert({
-      email,
-      token: inviteToken,
-      role,
-      invited_by: user.id,
-    })
-    .select()
-    .single();
-
-  if (insertErr) return json({ error: insertErr.message }, 500);
-
+  // Convite via Supabase Auth: cria o usuário (invited_at preenchido), o Supabase
+  // envia o email com o link e a pessoa define a senha em /set-password. A role
+  // viaja no user_metadata; o trigger grupos.handle_new_auth_user materializa a
+  // linha em grupos.users com essa role.
   const appUrl = (await getCredential("app_url")) ?? "";
-  const inviteUrl = `${appUrl}/invite?token=${inviteToken}`;
-  const resendKey = await getCredential("resend_api_key");
-  const from = (await getCredential("email_from")) ?? "noreply@example.com";
-  let emailSent = false;
-  if (resendKey) {
-    try {
-      emailSent = await sendInviteEmail(resendKey, from, email, inviteUrl);
-    } catch {
-      // ignora — owner pode usar o link manualmente
+  const redirectTo = appUrl ? `${appUrl}/set-password?type=invite` : undefined;
+
+  const { data, error: inviteErr } = await authClient.auth.admin.inviteUserByEmail(
+    email,
+    { data: { role }, ...(redirectTo ? { redirectTo } : {}) }
+  );
+
+  if (inviteErr) {
+    // Usuário pode já existir: nesse caso, apenas atualiza a role.
+    const { data: list } = await authClient.auth.admin.listUsers();
+    const existing = list?.users?.find(
+      (u) => u.email?.toLowerCase() === email
+    );
+    if (existing) {
+      await supabase
+        .from("users")
+        .update({ role, updated_at: new Date().toISOString() })
+        .eq("id", existing.id);
+      return json({
+        ok: true,
+        user_id: existing.id,
+        email_sent: false,
+        message: "Usuário já existe — papel atualizado.",
+      });
     }
+    return json({ error: inviteErr.message }, 400);
+  }
+
+  // Garante a role em grupos.users (o trigger já cria a linha; o upsert reforça).
+  if (data?.user) {
+    await supabase.from("users").upsert(
+      {
+        id: data.user.id,
+        email,
+        name: email.split("@")[0],
+        role,
+      },
+      { onConflict: "id" }
+    );
   }
 
   return json({
     ok: true,
-    invite_id: invite.id,
-    invite_url: inviteUrl,
-    email_sent: emailSent,
-    expires_at: invite.expires_at,
+    user_id: data?.user?.id,
+    email_sent: true,
   });
 });

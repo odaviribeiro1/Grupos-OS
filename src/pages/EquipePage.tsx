@@ -6,9 +6,7 @@ import {
   Crown,
   Pencil,
   Loader2,
-  Copy,
   X,
-  Check,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { supabase } from "@/lib/supabase";
@@ -32,9 +30,7 @@ type Invite = {
   id: string;
   email: string;
   role: UserRole;
-  token: string;
-  expires_at: string;
-  created_at: string;
+  invited_at: string;
 };
 
 function useMembers() {
@@ -64,14 +60,28 @@ function usePendingInvites() {
 
   async function load() {
     setLoading(true);
-    const { data } = await supabase
-      .from("invites")
-      .select("id, email, role, token, expires_at, created_at")
-      .is("used_at", null)
-      .is("revoked_at", null)
-      .order("created_at", { ascending: false });
-    setInvites((data ?? []) as Invite[]);
-    setLoading(false);
+    try {
+      const { data: session } = await supabase.auth.getSession();
+      const token = session?.session?.access_token;
+      const res = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/list-invites`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token || ""}`,
+          },
+        }
+      );
+      const data = (await res.json().catch(() => ({}))) as {
+        invites?: Invite[];
+      };
+      setInvites(res.ok ? (data.invites ?? []) : []);
+    } catch {
+      setInvites([]);
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -94,7 +104,6 @@ export function EquipePage() {
   const [success, setSuccess] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [revokingId, setRevokingId] = useState<string | null>(null);
-  const [copiedToken, setCopiedToken] = useState<string | null>(null);
 
   async function handleInvite() {
     if (!inviteEmail.trim()) return;
@@ -131,9 +140,8 @@ export function EquipePage() {
       if (!res.ok) throw new Error((data.error as string) || `HTTP ${res.status}`);
 
       setSuccess(
-        data.email_sent
-          ? `Convite enviado para ${inviteEmail.trim()} por email.`
-          : `Convite criado. Use "Copiar link" abaixo para enviar manualmente.`
+        (data.message as string) ??
+          `Convite enviado para ${inviteEmail.trim()} por email.`
       );
       setInviteEmail("");
       await reloadInvites();
@@ -144,8 +152,8 @@ export function EquipePage() {
     }
   }
 
-  async function handleRevoke(inviteId: string) {
-    setRevokingId(inviteId);
+  async function handleRevoke(userId: string) {
+    setRevokingId(userId);
     setError(null);
     try {
       const { data: session } = await supabase.auth.getSession();
@@ -159,7 +167,7 @@ export function EquipePage() {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token || ""}`,
           },
-          body: JSON.stringify({ invite_id: inviteId }),
+          body: JSON.stringify({ user_id: userId }),
         }
       );
 
@@ -178,17 +186,6 @@ export function EquipePage() {
       setError(e instanceof Error ? e.message : "Falha ao revogar");
     } finally {
       setRevokingId(null);
-    }
-  }
-
-  async function handleCopyLink(token: string) {
-    const url = `${window.location.origin}/invite?token=${token}`;
-    try {
-      await navigator.clipboard.writeText(url);
-      setCopiedToken(token);
-      setTimeout(() => setCopiedToken(null), 2000);
-    } catch {
-      setError("Não foi possível copiar — copie manualmente: " + url);
     }
   }
 
@@ -304,23 +301,11 @@ export function EquipePage() {
                 <div className="min-w-0">
                   <p className="truncate text-sm text-ink-100">{inv.email}</p>
                   <p className="text-[11px] text-ink-400">
-                    {inv.role} · expira em{" "}
-                    {new Date(inv.expires_at).toLocaleDateString("pt-BR")}
+                    {inv.role} · convidado em{" "}
+                    {new Date(inv.invited_at).toLocaleDateString("pt-BR")}
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => handleCopyLink(inv.token)}
-                  >
-                    {copiedToken === inv.token ? (
-                      <Check className="h-4 w-4 text-success" />
-                    ) : (
-                      <Copy className="h-4 w-4" />
-                    )}
-                    {copiedToken === inv.token ? "Copiado" : "Copiar link"}
-                  </Button>
                   <Button
                     variant="ghost"
                     size="icon"

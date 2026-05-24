@@ -7,7 +7,7 @@ const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
 };
 
 function json(body: unknown, status = 200) {
@@ -20,9 +20,6 @@ function json(body: unknown, status = 200) {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
-  }
-  if (req.method !== "POST") {
-    return json({ error: "Method not allowed" }, 405);
   }
 
   const authHeader = req.headers.get("Authorization");
@@ -48,35 +45,24 @@ Deno.serve(async (req) => {
     .single();
 
   if (!caller || (caller.role !== "owner" && caller.role !== "admin")) {
-    return json({ error: "Apenas o owner pode revogar convites" }, 403);
+    return json({ error: "Apenas o owner pode ver convites" }, 403);
   }
 
-  let body: { user_id?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return json({ error: "JSON inválido" }, 400);
-  }
+  // Pendente = convidado pelo Auth (invited_at preenchido) e que ainda não
+  // ativou a conta (sem last_sign_in_at).
+  const { data: list, error: listErr } = await authClient.auth.admin.listUsers({
+    perPage: 1000,
+  });
+  if (listErr) return json({ error: listErr.message }, 500);
 
-  if (!body.user_id) return json({ error: "user_id obrigatório" }, 400);
+  const invites = (list?.users ?? [])
+    .filter((u) => u.invited_at && !u.last_sign_in_at)
+    .map((u) => ({
+      id: u.id,
+      email: u.email ?? "",
+      role: (u.user_metadata?.role as string) ?? "member",
+      invited_at: u.invited_at as string,
+    }));
 
-  // Só revoga convites pendentes (usuário ainda não ativou a conta). Membros
-  // ativos devem ser removidos pela lista de Membros (delete-member).
-  const { data: target, error: getErr } =
-    await authClient.auth.admin.getUserById(body.user_id);
-  if (getErr || !target?.user) {
-    return json({ error: "Convite não encontrado" }, 404);
-  }
-  if (target.user.last_sign_in_at) {
-    return json(
-      { error: "Usuário já ativou a conta; remova pela lista de Membros." },
-      400
-    );
-  }
-
-  // Deleta o usuário no Auth — o FK on delete cascade remove de grupos.users.
-  const { error: delErr } = await authClient.auth.admin.deleteUser(body.user_id);
-  if (delErr) return json({ error: delErr.message }, 500);
-
-  return json({ ok: true, user_id: body.user_id });
+  return json({ invites });
 });

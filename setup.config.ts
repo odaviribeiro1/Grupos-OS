@@ -32,18 +32,6 @@ async function validateOpenAI(value: string): Promise<CredentialValidationResult
     : { ok: false, message: "Chave OpenAI inválida ou sem permissão" };
 }
 
-async function validateResend(value: string): Promise<CredentialValidationResult> {
-  if (!/^re_/i.test(value.trim())) {
-    return { ok: false, message: "A chave Resend normalmente começa com re_" };
-  }
-  const res = await fetch("https://api.resend.com/domains", {
-    headers: { Authorization: `Bearer ${value.trim()}` },
-  });
-  return res.ok
-    ? { ok: true }
-    : { ok: false, message: "Chave Resend inválida ou sem permissão" };
-}
-
 export const setupConfig: SetupConfig = {
   toolName: "GrupOS",
   toolSlug: "grupos",
@@ -95,27 +83,6 @@ export const setupConfig: SetupConfig = {
         if (value.trim().length < 8) {
           return { ok: false, message: "Token muito curto" };
         }
-        return { ok: true };
-      },
-    },
-    {
-      key: "resend_api_key",
-      label: "Resend API Key",
-      placeholder: "re_...",
-      inputType: "password",
-      docsUrl: "https://resend.com/api-keys",
-      helpText: "Opcional para envio automático de convites por email.",
-      validate: validateResend,
-    },
-    {
-      key: "email_from",
-      label: "Email remetente",
-      placeholder: "GrupOS <noreply@seudominio.com>",
-      inputType: "text",
-      docsUrl: "https://resend.com/domains",
-      helpText: "Remetente verificado no Resend para emails de convite.",
-      validate: async (value) => {
-        if (!value.trim()) return { ok: false, message: "Informe o remetente" };
         return { ok: true };
       },
     },
