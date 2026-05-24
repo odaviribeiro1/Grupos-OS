@@ -217,8 +217,6 @@ export function SetupPage() {
   const initialStep = new URLSearchParams(window.location.search).get("step") === "4" ? 4 : 1;
   const [step, setStep] = useState(initialStep);
   const [step2, setStep2] = useState<Step2Values>(() => readStep2());
-  // Se havia estado persistido, os campos sensíveis foram descartados de propósito.
-  const [loadedPartial] = useState(() => loadStep2() !== null);
   const [validity, setValidity] = useState<Record<string, boolean>>({});
   const [messages, setMessages] = useState<Record<string, string>>({});
   const [showOwnerPassword, setShowOwnerPassword] = useState(false);
@@ -454,11 +452,6 @@ export function SetupPage() {
           Estes dados são usados apenas durante o bootstrap. Tokens de bootstrap
           não são salvos como envs da aplicação.
         </p>
-        {loadedPartial && (
-          <div className="mb-6 rounded-xl border border-[rgba(59,130,246,0.3)] bg-[rgba(30,58,138,0.25)] p-4 text-[13px] leading-5 text-[#CBD5E1]">
-            Suas credenciais sensíveis precisam ser digitadas novamente por segurança.
-          </div>
-        )}
         <div className="grid gap-4">
           {step2Fields.map(([key, label, placeholder]) => {
             const isPassword = key !== "supabase_url" && key !== "owner_email";
