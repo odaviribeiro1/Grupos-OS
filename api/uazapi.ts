@@ -1,5 +1,10 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { getCredential, pgRest, verifyAccessToken } from "./_lib/credentials";
+import { createDecipheriv } from "node:crypto";
+
+// Autossuficiente de propósito (sem import de arquivo local) — ver nota em
+// api/credentials.ts. Supabase via fetch cru (PostgREST/GoTrue).
+
+const ALGORITHM = "aes-256-gcm";
 
 type UazapiGroup = {
   id: string;
@@ -13,6 +18,76 @@ function json(res: VercelResponse, status: number, body: unknown) {
 
 function normalizeUrl(raw: string) {
   return raw.trim().replace(/\/+$/, "");
+}
+
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name} ausente`);
+  return value;
+}
+
+async function pgRest(
+  path: string,
+  init: RequestInit = {},
+  schema = "public"
+): Promise<Response> {
+  const base = requireEnv("SUPABASE_URL").replace(/\/+$/, "");
+  const key = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+  const headers: Record<string, string> = {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+    "Content-Type": "application/json",
+    ...((init.headers as Record<string, string> | undefined) ?? {}),
+  };
+  if (schema !== "public") {
+    headers["Accept-Profile"] = schema;
+    headers["Content-Profile"] = schema;
+  }
+  return fetch(`${base}/rest/v1${path}`, { ...init, headers });
+}
+
+async function verifyAccessToken(jwt: string): Promise<{ id: string } | null> {
+  const base = requireEnv("SUPABASE_URL").replace(/\/+$/, "");
+  const anon = requireEnv("SUPABASE_ANON_KEY");
+  const res = await fetch(`${base}/auth/v1/user`, {
+    headers: { apikey: anon, Authorization: `Bearer ${jwt}` },
+  });
+  if (!res.ok) return null;
+  const user = (await res.json()) as { id?: string };
+  return user.id ? { id: user.id } : null;
+}
+
+function getCryptoKey(): Buffer {
+  const hex = process.env.CRYPTO_KEY;
+  if (!hex || hex.length !== 64 || !/^[a-f0-9]+$/i.test(hex)) {
+    throw new Error("CRYPTO_KEY ausente ou inválida (esperado: 64 chars hex)");
+  }
+  return Buffer.from(hex, "hex");
+}
+
+function decrypt(payload: string): string {
+  const [ivHex, tagHex, cipherHex] = payload.split(":");
+  if (!ivHex || !tagHex || !cipherHex) {
+    throw new Error("Payload de criptografia malformado");
+  }
+  const decipher = createDecipheriv(ALGORITHM, getCryptoKey(), Buffer.from(ivHex, "hex"));
+  decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+  const decrypted = Buffer.concat([
+    decipher.update(Buffer.from(cipherHex, "hex")),
+    decipher.final(),
+  ]);
+  return decrypted.toString("utf8");
+}
+
+async function getCredential(key: string): Promise<string | null> {
+  const res = await pgRest(
+    `/app_settings?key=eq.${encodeURIComponent(key)}&select=value_encrypted&limit=1`
+  );
+  if (!res.ok) {
+    throw new Error(`getCredential(${key}) falhou (${res.status}): ${await res.text()}`);
+  }
+  const rows = (await res.json()) as Array<{ value_encrypted: string }>;
+  return rows[0] ? decrypt(rows[0].value_encrypted) : null;
 }
 
 async function getAuthedUser(req: VercelRequest) {
