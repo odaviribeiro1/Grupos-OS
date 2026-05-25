@@ -167,12 +167,16 @@ async function setSupabaseSecrets(
   pat: string,
   values: Record<string, string>
 ) {
+  // A Management API rejeita secrets com prefixo SUPABASE_ (reservados e injetados
+  // automaticamente nas Edge Functions). Filtra fora; se nada sobrar, não chama a API.
+  const secrets = Object.entries(values)
+    .filter(([name]) => !name.startsWith("SUPABASE_"))
+    .map(([name, value]) => ({ name, value }));
+  if (secrets.length === 0) return;
   const res = await fetch(`https://api.supabase.com/v1/projects/${ref}/secrets`, {
     method: "POST",
     headers: { Authorization: `Bearer ${pat}`, "Content-Type": "application/json" },
-    body: JSON.stringify(
-      Object.entries(values).map(([name, value]) => ({ name, value }))
-    ),
+    body: JSON.stringify(secrets),
   });
   const text = await res.text();
   if (!res.ok) throw new Error(`Falha ao configurar secrets no Supabase (${res.status}): ${text}`);
@@ -365,9 +369,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Fix 8: sempre re-deploya as Edge Functions (upsert idempotente por slug) para
     // propagar mudanças de código no re-run — sem pular pelo step já marcado.
+    // SUPABASE_URL/ANON_KEY/SERVICE_ROLE_KEY/DB_URL são injetadas automaticamente nas
+    // Edge Functions pelo Supabase (e a Management API rejeita o prefixo SUPABASE_),
+    // então só precisamos setar a CRYPTO_KEY.
     await setSupabaseSecrets(ref, body.supabase_pat!, {
-      SUPABASE_URL: body.supabase_url!,
-      SUPABASE_SERVICE_ROLE_KEY: body.supabase_service_role_key!,
       CRYPTO_KEY: cryptoKey,
     });
     const slugs = listFunctionSlugs();
@@ -405,10 +410,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (!(await hasStep(ref, body.supabase_pat!, "vercel_envs_set"))) {
       const projectId = await findVercelProjectId(body.vercel_token!, req, body.vercel_project_id);
+      // Backend (api/** lê process.env.SUPABASE_*)
       await upsertVercelEnv(projectId, body.vercel_token!, "SUPABASE_URL", body.supabase_url!);
       await upsertVercelEnv(projectId, body.vercel_token!, "SUPABASE_ANON_KEY", body.supabase_anon_key!);
       await upsertVercelEnv(projectId, body.vercel_token!, "SUPABASE_SERVICE_ROLE_KEY", body.supabase_service_role_key!);
       await upsertVercelEnv(projectId, body.vercel_token!, "CRYPTO_KEY", cryptoKey);
+      // Frontend (Vite só expõe VITE_*; src/lib/supabase.ts lê estas no build)
+      await upsertVercelEnv(projectId, body.vercel_token!, "VITE_SUPABASE_URL", body.supabase_url!);
+      await upsertVercelEnv(projectId, body.vercel_token!, "VITE_SUPABASE_ANON_KEY", body.supabase_anon_key!);
       await markStep(ref, body.supabase_pat!, "vercel_envs_set", { project_id: projectId });
       stepsCompleted.push("vercel_envs_set");
     }
