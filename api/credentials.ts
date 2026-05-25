@@ -1,10 +1,10 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { createClient } from "@supabase/supabase-js";
 import { setupConfig } from "../setup.config";
 import {
-  getSupabaseAdmin,
   listExistingCredentials,
+  pgRest,
   setCredential,
+  verifyAccessToken,
 } from "../src/lib/credentials";
 
 type AuthResult = { userId: string } | { error: 401 | 403; message: string };
@@ -24,38 +24,25 @@ async function requireOwner(req: VercelRequest): Promise<AuthResult> {
   }
   const jwt = authHeader.slice("Bearer ".length);
 
-  const url = process.env.SUPABASE_URL;
-  const anon = process.env.SUPABASE_ANON_KEY;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !anon || !serviceKey) {
+  if (
+    !process.env.SUPABASE_URL ||
+    !process.env.SUPABASE_ANON_KEY ||
+    !process.env.SUPABASE_SERVICE_ROLE_KEY
+  ) {
     return { error: 401, message: "Supabase não configurado" };
   }
 
-  // 1. Validar JWT como o próprio usuário.
-  const userClient = createClient(url, anon, {
-    global: { headers: { Authorization: `Bearer ${jwt}` } },
-    auth: { persistSession: false },
-  });
-  const {
-    data: { user },
-    error: userError,
-  } = await userClient.auth.getUser();
-  if (userError || !user) {
+  // 1. Validar o JWT do usuário via GoTrue.
+  const user = await verifyAccessToken(jwt);
+  if (!user) {
     return { error: 401, message: "Sessão inválida ou expirada" };
   }
 
   // 2. Validar role no source of truth (grupos.users) via service role.
-  const adminClient = createClient(url, serviceKey, {
-    db: { schema: "grupos" },
-    auth: { persistSession: false },
-  });
-  const { data: profile } = await adminClient
-    .from("users")
-    .select("role")
-    .eq("id", user.id)
-    .maybeSingle();
-
-  if (profile?.role !== "owner" && profile?.role !== "admin") {
+  const res = await pgRest(`/users?id=eq.${user.id}&select=role&limit=1`, {}, "grupos");
+  const rows = res.ok ? ((await res.json()) as Array<{ role: string }>) : [];
+  const role = rows[0]?.role;
+  if (role !== "owner" && role !== "admin") {
     return { error: 403, message: "Apenas administradores podem editar credenciais" };
   }
 
@@ -69,11 +56,14 @@ async function validateCredential(key: string, value: string) {
 }
 
 async function markCredentialsSaved() {
-  const supabase = getSupabaseAdmin("public");
-  await supabase.from("_bootstrap_state").upsert({
-    step: "app_credentials_saved",
-    completed_at: new Date().toISOString(),
-    metadata: { keys: setupConfig.appCredentials.map((item) => item.key) },
+  await pgRest(`/_bootstrap_state`, {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates" },
+    body: JSON.stringify({
+      step: "app_credentials_saved",
+      completed_at: new Date().toISOString(),
+      metadata: { keys: setupConfig.appCredentials.map((item) => item.key) },
+    }),
   });
 }
 

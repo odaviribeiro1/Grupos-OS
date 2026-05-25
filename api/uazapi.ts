@@ -1,6 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { createClient } from "@supabase/supabase-js";
-import { getCredential, getSupabaseAdmin } from "../src/lib/credentials";
+import { getCredential, pgRest, verifyAccessToken } from "../src/lib/credentials";
 
 type UazapiGroup = {
   id: string;
@@ -19,13 +18,10 @@ function normalizeUrl(raw: string) {
 async function getAuthedUser(req: VercelRequest) {
   const auth = req.headers.authorization;
   if (!auth?.startsWith("Bearer ")) return null;
-  const url = process.env.SUPABASE_URL;
-  const anon = process.env.SUPABASE_ANON_KEY;
-  if (!url || !anon) throw new Error("Supabase não configurado");
-  const client = createClient(url, anon, { auth: { persistSession: false } });
-  const { data, error } = await client.auth.getUser(auth.replace("Bearer ", ""));
-  if (error || !data.user) return null;
-  return data.user;
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
+    throw new Error("Supabase não configurado");
+  }
+  return verifyAccessToken(auth.replace("Bearer ", ""));
 }
 
 async function fetchGroups(): Promise<UazapiGroup[]> {
@@ -65,14 +61,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const user = await getAuthedUser(req);
     if (!user) return json(res, 401, { success: false, message: "Não autorizado" });
 
-    const grupos = getSupabaseAdmin("grupos");
-
     if (req.method === "GET") {
       const groups = await fetchGroups();
-      const { data: existing } = await grupos.from("groups").select("whatsapp_group_id");
+      const existingRes = await pgRest("/groups?select=whatsapp_group_id", {}, "grupos");
+      const existing = existingRes.ok
+        ? ((await existingRes.json()) as Array<{ whatsapp_group_id: string }>)
+        : [];
       return json(res, 200, {
         groups,
-        existing_ids: (existing ?? []).map((row) => row.whatsapp_group_id as string),
+        existing_ids: existing.map((row) => row.whatsapp_group_id),
       });
     }
 
@@ -88,8 +85,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         participant_count: group.participantsCount ?? 0,
         is_active: true,
       }));
-      const { error } = await grupos.from("groups").insert(rows);
-      if (error) throw error;
+      const insertRes = await pgRest("/groups", { method: "POST", body: JSON.stringify(rows) }, "grupos");
+      if (!insertRes.ok) {
+        throw new Error(`Falha ao salvar grupos (${insertRes.status}): ${await insertRes.text()}`);
+      }
       return json(res, 200, { success: true });
     }
 
