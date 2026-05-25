@@ -1,11 +1,12 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
-// IMPORTANTE: este módulo é importado pelas serverless functions da Vercel
-// (api/credentials.ts, api/uazapi.ts). Com `"type": "module"` no package.json, o
-// @vercel/node empacota essas funções como ESM, e o @supabase/supabase-js quebra
-// nesse bundle (FUNCTION_INVOCATION_FAILED). Por isso falamos com o Supabase via
-// `fetch` cru no PostgREST/GoTrue — mesmo padrão do api/bootstrap.ts, que funciona.
-// O client @supabase/supabase-js continua sendo usado SÓ no frontend (src/lib/supabase.ts).
+// Fica em api/_lib/ (não em src/) DE PROPÓSITO: serverless functions da Vercel que
+// importam arquivos de fora da pasta api/ quebram com FUNCTION_INVOCATION_FAILED
+// (com "type":"module", o bundle não resolve esses imports cross-dir). Mantendo este
+// módulo dentro de api/, os imports são locais (./_lib/...) e funcionam.
+// (api/_* é ignorado pelo roteamento da Vercel, então não vira endpoint.)
+// O Supabase é acessado por fetch cru (PostgREST/GoTrue), como no api/bootstrap.ts —
+// o @supabase/supabase-js só roda no frontend (src/lib/supabase.ts).
 
 const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH = 12;
@@ -122,4 +123,44 @@ export async function listExistingCredentials(keys: string[]) {
   const rows = (await res.json()) as Array<{ key: string }>;
   const existing = new Set(rows.map((row) => row.key));
   return Object.fromEntries(keys.map((key) => [key, { exists: existing.has(key) }]));
+}
+
+// Validação server-side das credenciais da aplicação no momento de salvar.
+// ⚠️ Espelha as regras de `setupConfig.appCredentials[].validate` (setup.config.ts,
+// usado pelo frontend). Como serverless functions não podem importar setup.config
+// (fora de api/), mantemos esta cópia — ao adicionar/alterar uma credencial no
+// setup.config, atualize aqui também.
+export async function validateAppCredential(
+  key: string,
+  value: string
+): Promise<{ ok: boolean; message?: string }> {
+  const v = value.trim();
+  switch (key) {
+    case "openai_api_key": {
+      if (!/^sk-/i.test(v)) {
+        return { ok: false, message: "A chave OpenAI deve começar com sk-" };
+      }
+      const res = await fetch("https://api.openai.com/v1/models", {
+        headers: { Authorization: `Bearer ${v}` },
+      });
+      return res.ok
+        ? { ok: true }
+        : { ok: false, message: "Chave OpenAI inválida ou sem permissão" };
+    }
+    case "uazapi_api_url":
+      return /^https?:\/\/\S+\.\S+/i.test(v.replace(/\/+$/, ""))
+        ? { ok: true }
+        : { ok: false, message: "Informe uma URL válida começando com http:// ou https://" };
+    case "app_url":
+      return /^https:\/\/\S+\.\S+/i.test(v.replace(/\/+$/, ""))
+        ? { ok: true }
+        : { ok: false, message: "Informe uma URL https válida" };
+    case "uazapi_admin_token":
+    case "uazapi_instance_token":
+      return v.length >= 8
+        ? { ok: true }
+        : { ok: false, message: "Token muito curto" };
+    default:
+      return { ok: false, message: `Credencial desconhecida: ${key}` };
+  }
 }

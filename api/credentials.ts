@@ -1,11 +1,11 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { setupConfig } from "../setup.config";
 import {
   listExistingCredentials,
   pgRest,
   setCredential,
+  validateAppCredential,
   verifyAccessToken,
-} from "../src/lib/credentials";
+} from "./_lib/credentials";
 
 type AuthResult = { userId: string } | { error: 401 | 403; message: string };
 
@@ -49,20 +49,14 @@ async function requireOwner(req: VercelRequest): Promise<AuthResult> {
   return { userId: user.id };
 }
 
-async function validateCredential(key: string, value: string) {
-  const field = setupConfig.appCredentials.find((item) => item.key === key);
-  if (!field) return { ok: false, message: `Credencial desconhecida: ${key}` };
-  return field.validate(value);
-}
-
-async function markCredentialsSaved() {
+async function markCredentialsSaved(keys: string[]) {
   await pgRest(`/_bootstrap_state`, {
     method: "POST",
     headers: { Prefer: "resolution=merge-duplicates" },
     body: JSON.stringify({
       step: "app_credentials_saved",
       completed_at: new Date().toISOString(),
-      metadata: { keys: setupConfig.appCredentials.map((item) => item.key) },
+      metadata: { keys },
     }),
   });
 }
@@ -93,7 +87,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     for (const [key, value] of Object.entries(credentials)) {
       if (typeof value !== "string" || value.trim().length === 0) continue;
-      const result = await validateCredential(key, value);
+      const result = await validateAppCredential(key, value);
       if (!result.ok) {
         return json(res, 400, {
           success: false,
@@ -110,7 +104,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       saved.push(key);
     }
 
-    await markCredentialsSaved();
+    await markCredentialsSaved(saved);
     return json(res, 200, { success: true, saved });
   } catch (err) {
     return json(res, 500, {

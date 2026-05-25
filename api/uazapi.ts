@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { getCredential, pgRest, verifyAccessToken } from "../src/lib/credentials";
+import { getCredential, pgRest, verifyAccessToken } from "./_lib/credentials";
 
 type UazapiGroup = {
   id: string;
