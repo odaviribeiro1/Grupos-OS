@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, ExternalLink, Eye, EyeOff, Loader2, X } from "lucide-react";
 import { setupConfig } from "../../../setup.config";
 import { CredentialField } from "@/components/credentials/CredentialField";
@@ -231,6 +231,18 @@ export function SetupPage() {
   const [appValues, setAppValues] = useState<Record<string, string | null>>({});
   const [appValidity, setAppValidity] = useState<Record<string, boolean>>({});
   const [savingApps, setSavingApps] = useState(false);
+
+  // Refs estáveis: sem useCallback, o CredentialField recebe um callback novo a cada
+  // render do SetupPage, o que reentra no useEffect dele e re-valida em loop (a cada
+  // 800ms) após a 1ª validação — martelando a API da OpenAI. useCallback quebra o loop.
+  const handleAppChange = useCallback(
+    (key: string, value: string | null) => setAppValues((current) => ({ ...current, [key]: value })),
+    []
+  );
+  const handleAppValidation = useCallback(
+    (key: string, ok: boolean) => setAppValidity((current) => ({ ...current, [key]: ok })),
+    []
+  );
 
   // Sessão no Step 4: /api/credentials exige owner/admin autenticado.
   const [step4Session, setStep4Session] = useState<boolean | null>(null);
@@ -666,8 +678,8 @@ export function SetupPage() {
             key={field.key}
             field={field}
             initialHasValue={false}
-            onChange={(key, value) => setAppValues((current) => ({ ...current, [key]: value }))}
-            onValidationChange={(key, ok) => setAppValidity((current) => ({ ...current, [key]: ok }))}
+            onChange={handleAppChange}
+            onValidationChange={handleAppValidation}
           />
         ))}
       </div>

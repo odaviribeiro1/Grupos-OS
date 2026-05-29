@@ -140,7 +140,7 @@ Deno.serve(async (req) => {
   // 4. Fetch messages for context
   const { data: messages } = await supabase
     .from("messages")
-    .select("sender_name, sender_jid, text, message_timestamp")
+    .select("sender_name, sender_jid, text, message_timestamp, from_me, was_sent_by_api")
     .eq("group_id", group.id)
     .gte("message_timestamp", periodStart)
     .lte("message_timestamp", periodEnd)

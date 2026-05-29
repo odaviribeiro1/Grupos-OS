@@ -155,7 +155,11 @@ async function requireOwner(req: VercelRequest): Promise<AuthResult> {
   }
 
   const res = await pgRest(`/users?id=eq.${user.id}&select=role&limit=1`, {}, "grupos");
-  const rows = res.ok ? ((await res.json()) as Array<{ role: string }>) : [];
+  if (!res.ok) {
+    // Falha de backend (DB/rede/permissão) não é "sem permissão" — não mascarar como 403.
+    return { error: 500, message: `Falha ao verificar permissões (${res.status})` };
+  }
+  const rows = (await res.json()) as Array<{ role: string }>;
   const role = rows[0]?.role;
   if (role !== "owner" && role !== "admin") {
     return { error: 403, message: "Apenas administradores podem editar credenciais" };

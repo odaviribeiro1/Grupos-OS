@@ -62,7 +62,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             ? `${baseUrl}/rest/v1/`
             : `${baseUrl}/auth/v1/settings`;
         const r = await fetch(probe, { headers: { apikey: value } });
-        valid = r.status !== 401;
+        // Aceita só resposta de sucesso (consistente com supabase_pat/vercel_token).
+        // `!== 401` aceitaria 5xx/429/403 como válido (falso positivo).
+        valid = r.ok;
         if (!valid) message = "Chave Supabase inválida ou sem permissão";
         break;
       }

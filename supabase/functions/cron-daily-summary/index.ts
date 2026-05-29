@@ -82,6 +82,22 @@ Deno.serve(async (req) => {
         continue;
       }
 
+      // Idempotência: se já existe resumo de hoje para o grupo, pula (o cron pode
+      // reexecutar/retry/timeout). Sem isso, gera e envia resumos duplicados.
+      const { data: existing } = await supabase
+        .from("summaries")
+        .select("id")
+        .eq("group_id", group.id)
+        .eq("period_type", "today")
+        .gte("period_start", todayStartUtc)
+        .limit(1)
+        .maybeSingle();
+      if (existing) {
+        result.error = "Summary already exists today (skipped)";
+        results.push(result);
+        continue;
+      }
+
       // 3. Call generate-summary
       const genRes = await fetch(`${SUPABASE_URL}/functions/v1/generate-summary`, {
         method: "POST",
@@ -114,6 +130,8 @@ Deno.serve(async (req) => {
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+            // Autentica como chamada interna confiável (ver send-summary-to-group).
+            "x-internal-secret": Deno.env.get("CRYPTO_KEY") ?? "",
           },
           body: JSON.stringify({ summary_id: summaryId }),
         }

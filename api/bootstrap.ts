@@ -406,6 +406,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         email: body.owner_email!.toLowerCase().trim(),
       });
       stepsCompleted.push("owner_created");
+    } else {
+      // Re-run: recupera o user_id do metadata para não retornar owner_user_id vazio.
+      const meta = await getStepMetadata(ref, body.supabase_pat!, "owner_created");
+      if (typeof meta?.user_id === "string") ownerUserId = meta.user_id;
     }
 
     if (!(await hasStep(ref, body.supabase_pat!, "vercel_envs_set"))) {

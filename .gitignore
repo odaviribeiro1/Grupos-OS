@@ -47,3 +47,8 @@ ROTATION_CHECKLIST.md
 # Supabase local CLI state
 supabase/.branches/
 supabase/.temp/
+
+# Artefatos gerados pelo Playwright (não commitar)
+tests/screenshots/
+tests/report/
+tests/test-results/

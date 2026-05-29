@@ -178,21 +178,31 @@ Deno.serve(async (req) => {
     return json({ error: "Method not allowed" }, 405);
   }
 
-  const authHeader = req.headers.get("authorization");
-  if (!authHeader?.startsWith("Bearer ")) {
-    return json({ error: "Unauthorized" }, 401);
-  }
-  const token = authHeader.replace("Bearer ", "");
-  const { data: { user }, error: authErr } = await authClient.auth.getUser(token);
-  if (authErr || !user) return json({ error: "Unauthorized" }, 401);
+  // Chamada interna (cron-daily-summary): autentica por um segredo compartilhado
+  // (CRYPTO_KEY, injetado nas duas functions) via header x-internal-secret. Não dá pra
+  // usar a service_role como JWT de usuário — auth.getUser() a rejeita (era o bug do
+  // resumo diário). CRYPTO_KEY é secreto e só funcionos confiáveis o têm.
+  const internalSecret = Deno.env.get("CRYPTO_KEY") ?? "";
+  const isInternal =
+    internalSecret.length > 0 && req.headers.get("x-internal-secret") === internalSecret;
 
-  const { data: caller } = await supabase
-    .from("users")
-    .select("role")
-    .eq("id", user.id)
-    .single();
-  if (!caller || (caller.role !== "owner" && caller.role !== "admin")) {
-    return json({ error: "Apenas administradores podem enviar resumos" }, 403);
+  if (!isInternal) {
+    const authHeader = req.headers.get("authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return json({ error: "Unauthorized" }, 401);
+    }
+    const token = authHeader.replace("Bearer ", "");
+    const { data: { user }, error: authErr } = await authClient.auth.getUser(token);
+    if (authErr || !user) return json({ error: "Unauthorized" }, 401);
+
+    const { data: caller } = await supabase
+      .from("users")
+      .select("role")
+      .eq("id", user.id)
+      .single();
+    if (!caller || (caller.role !== "owner" && caller.role !== "admin")) {
+      return json({ error: "Apenas administradores podem enviar resumos" }, 403);
+    }
   }
 
   let body: { summary_id: string };
