@@ -51,21 +51,42 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           return res.status(400).json({ valid: false, message: "URL Supabase válida necessária" });
         }
         const baseUrl = supabase_url.trim();
-        // Só o header `apikey` (sem `Authorization: Bearer`, que quebraria chaves
-        // novas não-JWT). Endpoint por tipo: o root do PostgREST (/rest/v1/) é
+        // Endpoint por tipo: o root do PostgREST (/rest/v1/) é
         // service_role-only — a anon recebe 401 ali ("Only the service_role API key
         // can be used for this endpoint"). Por isso validamos a anon em
         // /auth/v1/settings (qualquer chave válida → 200; inválida → 401) e mantemos
         // /rest/v1/ para a service_role (só ela passa → rejeita anon no campo errado).
-        const probe =
-          type === "supabase_service_role_key"
-            ? `${baseUrl}/rest/v1/`
-            : `${baseUrl}/auth/v1/settings`;
-        const r = await fetch(probe, { headers: { apikey: value } });
+        const isServiceRole = type === "supabase_service_role_key";
+        const probe = isServiceRole
+          ? `${baseUrl}/rest/v1/`
+          : `${baseUrl}/auth/v1/settings`;
+
+        // Tenta primeiro com `apikey` (padrão Supabase/Kong).
+        let r = await fetch(probe, {
+          headers: { apikey: value, accept: "application/json" },
+        });
+        // Se falhou e é anon key, tenta com Authorization: Bearer como fallback
+        // (algumas configurações do GoTrue/Kong reconhecem apenas o Bearer).
+        if (!r.ok && !isServiceRole) {
+          r = await fetch(probe, {
+            headers: {
+              apikey: value,
+              authorization: `Bearer ${value}`,
+              accept: "application/json",
+            },
+          });
+        }
         // Aceita só resposta de sucesso (consistente com supabase_pat/vercel_token).
         // `!== 401` aceitaria 5xx/429/403 como válido (falso positivo).
         valid = r.ok;
-        if (!valid) message = "Chave Supabase inválida ou sem permissão";
+        if (!valid) {
+          message = "Chave Supabase inválida ou sem permissão";
+          console.warn("[validate-token] probe falhou", {
+            ...logCtx,
+            status: r.status,
+            probe,
+          });
+        }
         break;
       }
 
