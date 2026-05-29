@@ -8,6 +8,8 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   db: { schema: "grupos" },
 });
 
+const authClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -259,6 +261,12 @@ Deno.serve(async (req) => {
   const authHeader = req.headers.get("authorization");
   if (!authHeader?.startsWith("Bearer ")) {
     return json({ error: "Unauthorized" }, 401);
+  }
+  const token = authHeader.replace("Bearer ", "");
+  const isServiceRole = token === SUPABASE_SERVICE_ROLE_KEY;
+  if (!isServiceRole) {
+    const { data: { user }, error: authErr } = await authClient.auth.getUser(token);
+    if (authErr || !user) return json({ error: "Unauthorized" }, 401);
   }
 
   let body: {

@@ -67,14 +67,14 @@ Deno.serve(async (req) => {
     return json({ error: "Cannot delete yourself" }, 400);
   }
 
-  // Verify requester is admin
+  // Verify requester is admin or owner
   const { data: requester } = await supabase
     .from("users")
     .select("role")
     .eq("id", body.requester_id)
     .single();
 
-  if (!requester || requester.role !== "admin") {
+  if (!requester || (requester.role !== "admin" && requester.role !== "owner")) {
     return json({ error: "Only admins can delete members" }, 403);
   }
 

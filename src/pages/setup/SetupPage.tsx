@@ -195,21 +195,23 @@ function wait(ms: number) {
   });
 }
 
-async function waitForHealth(timeoutMs = 300000, intervalMs = 3000) {
+async function waitForHealth(timeoutMs = 300000, intervalMs = 3000, deploymentUrl?: string) {
+  const urls = [window.location.origin];
+  if (deploymentUrl && !urls.includes(deploymentUrl)) urls.push(deploymentUrl);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`${window.location.origin}/api/health`, {
-        cache: "no-store",
-      });
-      if (res.ok) return;
-    } catch {
-      // O deployment pode estar trocando de versão. Tenta novamente até o timeout.
+    for (const origin of urls) {
+      try {
+        const res = await fetch(`${origin}/api/health`, { cache: "no-store" });
+        if (res.ok) return;
+      } catch {
+        // O deployment pode estar trocando de versão. Tenta novamente até o timeout.
+      }
     }
     await wait(intervalMs);
   }
   throw new Error(
-    "Aguardamos 5 minutos e a aplicação ainda não reiniciou com as novas envs. Verifique manualmente em vercel.com/dashboard e tente acessar /setup?step=4 novamente."
+    `Aguardamos 5 minutos e a aplicação ainda não reiniciou com as novas envs. ${deploymentUrl ? `Tente acessar ${deploymentUrl}/setup?step=4` : "Verifique manualmente em vercel.com/dashboard e recarregue /setup?step=4"}`
   );
 }
 
@@ -219,6 +221,7 @@ export function SetupPage() {
   const [step2, setStep2] = useState<Step2Values>(() => readStep2());
   const [validity, setValidity] = useState<Record<string, boolean>>({});
   const [messages, setMessages] = useState<Record<string, string>>({});
+  const [validationEpoch, setValidationEpoch] = useState(0);
   const [showOwnerPassword, setShowOwnerPassword] = useState(false);
   const [bootstrapBusy, setBootstrapBusy] = useState(false);
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
@@ -257,15 +260,18 @@ export function SetupPage() {
 
   useEffect(() => {
     if (step !== 2) return;
+    const epoch = validationEpoch;
     const timers: number[] = [];
     for (const [key] of step2Fields) {
       const value = step2[key];
       if (!value.trim()) continue;
       const timer = window.setTimeout(() => {
         void validateStep2Field(key, step2).then((result) => {
+          if (epoch !== validationEpoch) return;
           setValidity((current) => ({ ...current, [key]: result.ok }));
           setMessages((current) => ({ ...current, [key]: result.message ?? "" }));
         }).catch((err: unknown) => {
+          if (epoch !== validationEpoch) return;
           setValidity((current) => ({ ...current, [key]: false }));
           setMessages((current) => ({
             ...current,
@@ -276,7 +282,7 @@ export function SetupPage() {
       timers.push(timer);
     }
     return () => timers.forEach((timer) => window.clearTimeout(timer));
-  }, [step, step2, step2Fields]);
+  }, [step, step2, step2Fields, validationEpoch]);
 
   // Ao chegar no Step 4, verifica se há sessão (o login automático pode ter ocorrido
   // no fim do Step 3, ou a sessão foi persistida pelo client Supabase).
@@ -321,7 +327,7 @@ export function SetupPage() {
         );
       }
       setBootstrapPhase("waiting-redeploy");
-      await waitForHealth();
+      await waitForHealth(300000, 3000, data.deployment_url ? String(data.deployment_url) : undefined);
       setBootstrapPhase("ready");
 
       // Tenta autenticar o owner recém-criado enquanto a senha ainda está em memória.
@@ -474,6 +480,10 @@ export function SetupPage() {
                     onChange={(event) => {
                       setStep2((current) => ({ ...current, [key]: event.target.value }));
                       setValidity((current) => ({ ...current, [key]: false }));
+                      setValidationEpoch((current) => current + 1);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && allStep2Valid) runBootstrap();
                     }}
                     placeholder={placeholder}
                     className="min-h-11 w-full rounded-lg border border-[rgba(59,130,246,0.2)] bg-[rgba(255,255,255,0.03)] px-4 py-3 pr-14 text-sm text-[#F8FAFC] placeholder:text-[#94A3B8] focus:border-[#3B82F6] focus:outline-none focus:shadow-[0_0_20px_rgba(59,130,246,0.2)]"
@@ -496,7 +506,7 @@ export function SetupPage() {
           })}
         </div>
         <div className="mt-8 flex justify-end">
-          <PrimaryButton onClick={runBootstrap} disabled={!allStep2Valid}>Configurar</PrimaryButton>
+          <PrimaryButton onClick={runBootstrap} disabled={!allStep2Valid || bootstrapBusy}>Configurar</PrimaryButton>
         </div>
       </SetupShell>
     );
@@ -572,8 +582,17 @@ export function SetupPage() {
           </div>
         )}
         <div className="mt-8 flex justify-end">
-          <PrimaryButton onClick={runBootstrap} disabled={bootstrapBusy}>
-            {bootstrapBusy ? "Configurando..." : bootstrapError ? "Tentar de novo" : "Continuar"}
+          <PrimaryButton onClick={() => {
+            if (bootstrapPhase === "ready") {
+              window.location.href = "/setup?step=4";
+            } else {
+              runBootstrap();
+            }
+          }} disabled={bootstrapBusy}>
+            {bootstrapBusy ? "Configurando..."
+              : bootstrapPhase === "ready" ? "Ir para o próximo passo"
+              : bootstrapError ? "Tentar de novo"
+              : "Continuar"}
           </PrimaryButton>
         </div>
       </SetupShell>

@@ -45,24 +45,24 @@ Deno.serve(async (req) => {
     return json({ error: "role must be admin or editor" }, 400);
   }
 
-  // Verify inviter is admin
+  // Verify inviter is admin or owner
   const { data: inviter } = await supabase
     .from("users")
     .select("role")
     .eq("id", body.inviter_id)
     .single();
 
-  if (!inviter || inviter.role !== "admin") {
+  if (!inviter || (inviter.role !== "admin" && inviter.role !== "owner")) {
     return json({ error: "Only admins can invite members" }, 403);
   }
 
-  // Try to invite via Supabase Auth
+  // Try to invite via Supabase Auth, passing role in metadata
   const redirectTo = body.origin
     ? `${body.origin}/set-password?type=invite`
     : undefined;
   const { data, error: inviteErr } = await authClient.auth.admin.inviteUserByEmail(
     body.email.trim(),
-    redirectTo ? { redirectTo } : undefined
+    { data: { role: body.role }, ...(redirectTo ? { redirectTo } : {}) }
   );
 
   if (inviteErr) {

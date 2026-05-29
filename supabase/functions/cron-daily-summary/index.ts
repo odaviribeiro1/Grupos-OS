@@ -74,7 +74,7 @@ Deno.serve(async (req) => {
         .select("*", { count: "exact", head: true })
         .eq("group_id", group.id)
         .gte("message_timestamp", todayStartUtc)
-        .not("from_me", "is", null);
+        .or("from_me.eq.false,was_sent_by_api.eq.false");
 
       if (!count || count === 0) {
         result.error = "No messages today";

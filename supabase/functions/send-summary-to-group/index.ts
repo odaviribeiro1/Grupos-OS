@@ -8,6 +8,8 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   db: { schema: "grupos" },
 });
 
+const authClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -174,6 +176,23 @@ Deno.serve(async (req) => {
   }
   if (req.method !== "POST") {
     return json({ error: "Method not allowed" }, 405);
+  }
+
+  const authHeader = req.headers.get("authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return json({ error: "Unauthorized" }, 401);
+  }
+  const token = authHeader.replace("Bearer ", "");
+  const { data: { user }, error: authErr } = await authClient.auth.getUser(token);
+  if (authErr || !user) return json({ error: "Unauthorized" }, 401);
+
+  const { data: caller } = await supabase
+    .from("users")
+    .select("role")
+    .eq("id", user.id)
+    .single();
+  if (!caller || (caller.role !== "owner" && caller.role !== "admin")) {
+    return json({ error: "Apenas administradores podem enviar resumos" }, 403);
   }
 
   let body: { summary_id: string };

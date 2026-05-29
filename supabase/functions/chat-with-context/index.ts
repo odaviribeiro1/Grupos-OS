@@ -8,6 +8,8 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   db: { schema: "grupos" },
 });
 
+const authClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -82,6 +84,14 @@ Deno.serve(async (req) => {
     return json({ error: "Method not allowed" }, 405);
   }
 
+  const authHeader = req.headers.get("authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return json({ error: "Unauthorized" }, 401);
+  }
+  const token = authHeader.replace("Bearer ", "");
+  const { data: { user }, error: authErr } = await authClient.auth.getUser(token);
+  if (authErr || !user) return json({ error: "Unauthorized" }, 401);
+
   let body: {
     group_id: string;
     user_id: string;
@@ -99,6 +109,10 @@ Deno.serve(async (req) => {
 
   if (!body.group_id || !body.user_id || !body.message) {
     return json({ error: "group_id, user_id, and message are required" }, 400);
+  }
+
+  if (body.user_id !== user.id) {
+    return json({ error: "user_id não corresponde ao token de autenticação" }, 403);
   }
 
   // 1. Get group
