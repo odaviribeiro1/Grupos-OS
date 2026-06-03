@@ -6,6 +6,9 @@
   "functions": {
     "api/bootstrap.ts": {
       "includeFiles": "supabase/**"
+    },
+    "api/redeploy-functions.ts": {
+      "includeFiles": "supabase/**"
     }
   },
   "rewrites": [
