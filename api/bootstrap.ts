@@ -449,6 +449,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     await markStep(ref, body.supabase_pat!, "edge_functions_deployed", { count: slugs.length });
     stepsCompleted.push("edge_functions_deployed");
 
+    // Agenda o cron diário de resumos. A função grupos.schedule_daily_summary
+    // (criada pela migration 0009) é idempotente — re-rodar sobrescreve o job
+    // com a URL atual. Sempre re-aplica pra capturar mudança de project URL.
+    {
+      const fnUrl = `${body.supabase_url!.replace(/\/+$/, "")}/functions/v1/cron-daily-summary`;
+      const escaped = fnUrl.replace(/'/g, "''");
+      await supabaseQuery(
+        ref,
+        body.supabase_pat!,
+        `select grupos.schedule_daily_summary('${escaped}');`
+      );
+      await markStep(ref, body.supabase_pat!, "cron_scheduled", { function_url: fnUrl });
+      if (!stepsCompleted.includes("cron_scheduled")) stepsCompleted.push("cron_scheduled");
+    }
+
     if (!(await hasStep(ref, body.supabase_pat!, "owner_created"))) {
       const owner = await createOwner({
         supabase_url: body.supabase_url!,
