@@ -70,6 +70,28 @@ function periodWindow(frequency: Schedule["frequency"]):
   };
 }
 
+// Início UTC da janela, pra usar no count de mensagens ANTES de chamar
+// generate-summary. Daily = meia-noite de Brasília hoje (03:00 UTC do dia).
+// Weekly/monthly = N dias atrás. Necessário porque o cron decide se vai disparar
+// antes de pagar o custo do LLM.
+function windowStartIso(frequency: Schedule["frequency"]): string {
+  const now = new Date();
+  if (frequency === "daily") {
+    const nowBrasilia = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+    return new Date(
+      Date.UTC(
+        nowBrasilia.getUTCFullYear(),
+        nowBrasilia.getUTCMonth(),
+        nowBrasilia.getUTCDate(),
+        3, 0, 0
+      )
+    ).toISOString();
+  }
+  const start = new Date(now);
+  start.setDate(start.getDate() - (frequency === "weekly" ? 7 : 30));
+  return start.toISOString();
+}
+
 // Idempotência: se last_run_at é da mesma hora cheia que agora, pula.
 // pg_net pode retry/duplicar — sem isso geramos resumos duplicados.
 function alreadyRanThisHour(lastRunAt: string | null): boolean {
@@ -152,6 +174,35 @@ Deno.serve(async (req) => {
 
     if (!group || !group.is_active) {
       r.skipped_reason = "group inactive";
+      results.push(r);
+      continue;
+    }
+
+    // Pré-checagem: se não há interação no período, NÃO gera resumo (custo
+    // de LLM) e NÃO envia no grupo. Marca last_run_at mesmo assim pra evitar
+    // que pg_net retry/duplicate disparem novas tentativas na mesma hora.
+    // Filtro casa com generate-summary: ignora mensagens que VIERAM da nossa
+    // própria API (from_me=true E was_sent_by_api=true).
+    const startIso = windowStartIso(s.frequency);
+    const { count: msgCount, error: countErr } = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("group_id", s.group_id)
+      .gte("message_timestamp", startIso)
+      .or("from_me.eq.false,was_sent_by_api.eq.false");
+
+    if (countErr) {
+      r.error = `count: ${countErr.message}`;
+      results.push(r);
+      continue;
+    }
+
+    if (!msgCount || msgCount === 0) {
+      r.skipped_reason = "no messages in period — summary not generated/sent";
+      await supabase
+        .from("group_summary_schedules")
+        .update({ last_run_at: new Date().toISOString() })
+        .eq("id", s.id);
       results.push(r);
       continue;
     }
