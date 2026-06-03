@@ -1,12 +1,83 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Save } from "lucide-react";
+import { Check, Copy, Save, Webhook } from "lucide-react";
 import { setupConfig } from "../../../setup.config";
 import { CredentialField } from "@/components/credentials/CredentialField";
 import { toast } from "@/components/ui/Toast";
 import { supabase } from "@/lib/supabase";
 
 type ExistsResponse = Record<string, { exists: boolean }>;
+
+// URL completa do webhook que a UAZAPI precisa chamar pra entregar mensagens
+// pra Edge Function `webhook-uazapi`. Construída a partir de VITE_SUPABASE_URL
+// (assada no bundle pelo bootstrap do wizard), então já vem com o project ref
+// do aluno embutido — basta copiar e colar na configuração da instância.
+function buildWebhookUrl(): string | null {
+  const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
+  if (!supabaseUrl) return null;
+  return `${supabaseUrl.replace(/\/+$/, "")}/functions/v1/webhook-uazapi`;
+}
+
+function WebhookCard() {
+  const url = useMemo(buildWebhookUrl, []);
+  const [copied, setCopied] = useState(false);
+
+  if (!url) return null;
+
+  async function copy() {
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      toast("URL do webhook copiada.", "success");
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast("Não foi possível copiar. Selecione o texto manualmente.", "error");
+    }
+  }
+
+  return (
+    <div className="mb-6 rounded-xl border border-[rgba(59,130,246,0.2)] bg-[rgba(30,58,138,0.18)] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      <div className="mb-3 flex items-start gap-3">
+        <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-[rgba(96,165,250,0.4)] bg-[rgba(30,58,138,0.4)] text-[#60A5FA]">
+          <Webhook className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h2 className="text-base font-semibold text-[#F8FAFC]">
+            URL do webhook (UAZAPI → ferramenta)
+          </h2>
+          <p className="mt-1 text-[13px] leading-5 text-[#94A3B8]">
+            Cole essa URL no campo de webhook da sua instância UAZAPI e habilite
+            o evento <span className="font-mono text-[#CBD5E1]">messages</span>.
+            Sem isso, as mensagens dos grupos não chegam aqui.
+          </p>
+        </div>
+      </div>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+        <div className="flex min-h-11 flex-1 items-center overflow-x-auto rounded-lg border border-[rgba(59,130,246,0.25)] bg-[rgba(0,0,0,0.35)] px-4 font-mono text-[13px] text-[#F8FAFC]">
+          <span className="whitespace-nowrap">{url}</span>
+        </div>
+        <button
+          type="button"
+          onClick={copy}
+          className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-[rgba(59,130,246,0.35)] bg-[rgba(30,58,138,0.4)] px-4 text-sm font-medium text-[#F8FAFC] transition-all duration-300 hover:shadow-[0_0_30px_rgba(59,130,246,0.35)]"
+        >
+          {copied ? (
+            <>
+              <Check className="h-4 w-4 text-[#10B981]" />
+              Copiado
+            </>
+          ) : (
+            <>
+              <Copy className="h-4 w-4" />
+              Copiar
+            </>
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export function CredentialsPage() {
   const [exists, setExists] = useState<Record<string, boolean>>({});
@@ -94,6 +165,8 @@ export function CredentialsPage() {
           vigor imediatamente, sem redeploy.
         </p>
       </div>
+
+      <WebhookCard />
 
       <div className={setupConfig.appCredentials.length > 6 ? "grid gap-4 lg:grid-cols-2" : "grid gap-4"}>
         {setupConfig.appCredentials.map((field) => (
