@@ -3,6 +3,7 @@
 // NUNCA persiste credenciais sensíveis (senha do owner, tokens core).
 
 const STORAGE_KEY = "agentise.setup.step2";
+const STEP_KEY = "agentise.setup.step";
 
 // Chaves que NUNCA podem ir pra localStorage.
 const SENSITIVE_KEYS = [
@@ -87,7 +88,30 @@ export function loadStep2(): PersistedStep2 | null {
 export function clearStep2(): void {
   try {
     localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(STEP_KEY);
   } catch {
     /* noop */
+  }
+}
+
+// Step atual do wizard (1-4). Persistido para resumir após refresh acidental
+// durante o bootstrap. Apenas um inteiro — não tem credencial nem PII.
+export function persistStep(step: number): void {
+  try {
+    localStorage.setItem(STEP_KEY, String(step));
+  } catch {
+    /* noop */
+  }
+}
+
+export function loadStep(): number | null {
+  try {
+    const raw = localStorage.getItem(STEP_KEY);
+    if (!raw) return null;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 4) return null;
+    return parsed;
+  } catch {
+    return null;
   }
 }

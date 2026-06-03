@@ -77,6 +77,24 @@ async function getStepMetadata(ref: string, pat: string, step: string) {
   return (result?.[0]?.metadata ?? result?.data?.[0]?.metadata ?? null) as Record<string, unknown> | null;
 }
 
+// Lê todos os steps já marcados em _bootstrap_state. Usado para popular
+// stepsCompleted no início do handler — assim o frontend mostra a timeline
+// completa mesmo num retry onde tudo já estava pronto (antes só aparecia o
+// que era recém-executado, e o timeline ficava em branco no caso "tudo OK").
+async function listCompletedSteps(ref: string, pat: string): Promise<string[]> {
+  try {
+    const result = await supabaseQuery(
+      ref,
+      pat,
+      `select step from public._bootstrap_state order by completed_at asc;`
+    );
+    const rows = (Array.isArray(result) ? result : result?.data ?? []) as Array<{ step?: unknown }>;
+    return rows.map((r) => (typeof r.step === "string" ? r.step : "")).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 async function getOrCreateCryptoKey(ref: string, pat: string) {
   const metadata = await getStepMetadata(ref, pat, "crypto_key_generated");
   const existing = typeof metadata?.crypto_key === "string" ? metadata.crypto_key : "";
@@ -232,8 +250,12 @@ async function createOwner(body: Required<Pick<BootstrapBody,
     userId = created.id;
   }
 
-  const email = body.owner_email.toLowerCase().trim().replace(/'/g, "''");
-  const name = email.split("@")[0].replace(/'/g, "''");
+  // Escapa email e name a partir do valor BRUTO — não derive name de uma string
+  // já escapada, senão o replace roda duas vezes e quebra emails com `'`.
+  const emailRaw = body.owner_email.toLowerCase().trim();
+  const nameRaw = emailRaw.split("@")[0];
+  const email = emailRaw.replace(/'/g, "''");
+  const name = nameRaw.replace(/'/g, "''");
   const sql = `
     insert into grupos.users (id, email, name, role)
     values ('${userId}', '${email}', '${name}', 'owner')
@@ -327,6 +349,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return json(res, 405, { success: false, message: "Método não permitido" });
   }
 
+  // ⚠️ NUNCA logar req.body: contém owner_password e tokens em texto puro. Não
+  // adicione console.log(body) sob nenhuma circunstância.
+  if (!req.body || typeof req.body !== "object") {
+    return json(res, 400, { success: false, step_failed: "validate_payload", message: "Corpo inválido" });
+  }
   const body = req.body as BootstrapBody;
   const required = [
     "supabase_url",
@@ -338,20 +365,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     "owner_password",
   ] as const;
   for (const key of required) {
-    if (!body[key]) {
+    if (!body[key] || typeof body[key] !== "string") {
       return json(res, 400, { success: false, step_failed: "validate_payload", message: `${key} é obrigatório` });
     }
   }
 
   const ref = projectRefFromUrl(body.supabase_url!);
-  const stepsCompleted: string[] = [];
+  // Seeded com tudo que já estava marcado em _bootstrap_state. No retry "tudo
+  // OK", o frontend mostra a timeline cheia ao invés de em branco.
+  const stepsCompleted: string[] = await listCompletedSteps(ref, body.supabase_pat!);
   let ownerUserId = "";
 
   try {
     await supabaseQuery(ref, body.supabase_pat!, CORE_STATE_SQL);
     const cryptoKey = await getOrCreateCryptoKey(ref, body.supabase_pat!);
-    await markStep(ref, body.supabase_pat!, "connection_ok", { project_ref: ref });
-    stepsCompleted.push("connection_ok");
+    if (!stepsCompleted.includes("connection_ok")) {
+      await markStep(ref, body.supabase_pat!, "connection_ok", { project_ref: ref });
+      stepsCompleted.push("connection_ok");
+    }
 
     for (const migration of listMigrationFiles()) {
       const step = `migration:${migration.file}`;
@@ -432,6 +463,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       deployment = await triggerRedeploy(projectId, body.vercel_token!);
       await markStep(ref, body.supabase_pat!, "redeploy_triggered", deployment);
       stepsCompleted.push("redeploy_triggered");
+    } else {
+      // Retry: recupera deployment_url do metadata para o waitForHealth do client
+      // poder pollar o deployment certo (não só o origin atual).
+      const meta = await getStepMetadata(ref, body.supabase_pat!, "redeploy_triggered");
+      if (meta) {
+        const id = typeof meta.deployment_id === "string" ? meta.deployment_id : "";
+        const url = typeof meta.deployment_url === "string" ? meta.deployment_url : "";
+        deployment = { deployment_id: id, deployment_url: url };
+      }
     }
 
     return json(res, 200, {

@@ -1,10 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, ExternalLink, Eye, EyeOff, Loader2, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, Check, ExternalLink, Eye, EyeOff, Loader2, X } from "lucide-react";
 import { setupConfig } from "../../../setup.config";
 import { CredentialField } from "@/components/credentials/CredentialField";
 import { toast } from "@/components/ui/Toast";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
-import { clearStep2, loadStep2, persistStep2 } from "@/lib/setup-persistence";
+import {
+  clearStep2,
+  loadStep,
+  loadStep2,
+  persistStep,
+  persistStep2,
+} from "@/lib/setup-persistence";
 
 const STEP_LABELS = ["PREPARAR", "CREDENCIAIS", "BOOTSTRAP", "APIS"];
 
@@ -17,6 +23,8 @@ type Step2Values = {
   owner_email: string;
   owner_password: string;
 };
+
+type Step2Key = keyof Step2Values;
 
 type BootstrapPhase = "idle" | "bootstrapping" | "waiting-redeploy" | "ready";
 
@@ -33,6 +41,15 @@ const emptyStep2: Step2Values = {
 // Carrega o estado persistido (sem credenciais sensíveis — elas sempre voltam vazias).
 function readStep2(): Step2Values {
   return { ...emptyStep2, ...(loadStep2() ?? {}) };
+}
+
+// Normaliza um host/URL retornado pela Vercel para uma URL completa. A API da
+// Vercel devolve `app-abc.vercel.app` sem scheme — `fetch` interpreta isso como
+// caminho relativo. Centralizar aqui evita o bug de B-01 voltar.
+function ensureHttps(value: string): string {
+  const v = value.trim();
+  if (!v) return v;
+  return /^https?:\/\//i.test(v) ? v : `https://${v}`;
 }
 
 function SetupShell({ step, children }: { step: number; children: React.ReactNode }) {
@@ -100,6 +117,18 @@ function PrimaryButton(props: React.ButtonHTMLAttributes<HTMLButtonElement>) {
   );
 }
 
+function SecondaryButton(props: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button
+      {...props}
+      className={[
+        "min-h-11 rounded-xl border border-[rgba(59,130,246,0.3)] bg-[rgba(30,58,138,0.25)] px-5 py-3 text-sm font-medium text-[#CBD5E1] transition-colors hover:bg-[rgba(30,58,138,0.4)] hover:text-[#F8FAFC] disabled:cursor-not-allowed disabled:opacity-40",
+        props.className ?? "",
+      ].join(" ")}
+    />
+  );
+}
+
 function PrepCard({
   n,
   title,
@@ -149,7 +178,7 @@ function PrepCard({
 // Tokens core (anon, service role, PAT Supabase, token Vercel) são validados
 // SERVER-SIDE via /api/validate-token — o valor nunca sai do browser para as
 // APIs de gerenciamento externas. URL/email/senha validam por regex local.
-async function validateStep2Field(name: keyof Step2Values, values: Step2Values) {
+async function validateStep2Field(name: Step2Key, values: Step2Values) {
   const value = values[name].trim();
 
   if (name === "supabase_url") {
@@ -175,16 +204,24 @@ async function validateStep2Field(name: keyof Step2Values, values: Step2Values) 
     }
     payload.supabase_url = values.supabase_url.trim();
   }
+  if (name === "supabase_pat" && values.supabase_url.trim()) {
+    // Mandar a URL ativa o probe que valida scope no projeto certo.
+    payload.supabase_url = values.supabase_url.trim();
+  }
 
   try {
     const res = await fetch("/api/validate-token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(10000),
     });
     const data = await res.json();
     return { ok: Boolean(data.valid), message: data.message };
-  } catch {
+  } catch (err) {
+    if (err instanceof Error && err.name === "TimeoutError") {
+      return { ok: false, message: "Validação demorou. Tente novamente." };
+    }
     return { ok: false, message: "Falha ao validar" };
   }
 }
@@ -196,13 +233,22 @@ function wait(ms: number) {
 }
 
 async function waitForHealth(timeoutMs = 300000, intervalMs = 3000, deploymentUrl?: string) {
+  // Normaliza ANTES de injetar na lista — a Vercel devolve hostname sem scheme,
+  // e fetch("foo.vercel.app/api/health") seria tratado como caminho relativo.
+  const candidate = deploymentUrl ? ensureHttps(deploymentUrl) : "";
   const urls = [window.location.origin];
-  if (deploymentUrl && !urls.includes(deploymentUrl)) urls.push(deploymentUrl);
+  if (candidate && !urls.includes(candidate)) urls.push(candidate);
+
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     for (const origin of urls) {
       try {
-        const res = await fetch(`${origin}/api/health`, { cache: "no-store" });
+        const res = await fetch(`${origin}/api/health`, {
+          cache: "no-store",
+          // Sem timeout, fetch pode segurar ~30s contra o deployment antigo e
+          // queimar quase todo o orçamento em poucas tentativas.
+          signal: AbortSignal.timeout(5000),
+        });
         if (res.ok) return;
       } catch {
         // O deployment pode estar trocando de versão. Tenta novamente até o timeout.
@@ -211,26 +257,42 @@ async function waitForHealth(timeoutMs = 300000, intervalMs = 3000, deploymentUr
     await wait(intervalMs);
   }
   throw new Error(
-    `Aguardamos 5 minutos e a aplicação ainda não reiniciou com as novas envs. ${deploymentUrl ? `Tente acessar ${deploymentUrl}/setup?step=4` : "Verifique manualmente em vercel.com/dashboard e recarregue /setup?step=4"}`
+    `Aguardamos 5 minutos e a aplicação ainda não reiniciou com as novas envs. ${candidate ? `Tente acessar ${candidate}/setup?step=4` : "Verifique manualmente em vercel.com/dashboard e recarregue /setup?step=4"}`
   );
 }
 
 export function SetupPage() {
-  const initialStep = new URLSearchParams(window.location.search).get("step") === "4" ? 4 : 1;
+  // Step inicial: ?step=4 tem prioridade absoluta (rota pós-redeploy). Sem ela,
+  // tenta retomar do step persistido (1-3). Default = 1.
+  const initialStep = (() => {
+    if (new URLSearchParams(window.location.search).get("step") === "4") return 4;
+    const persisted = loadStep();
+    if (persisted && persisted >= 1 && persisted <= 3) return persisted;
+    return 1;
+  })();
+
   const [step, setStep] = useState(initialStep);
   const [step2, setStep2] = useState<Step2Values>(() => readStep2());
   const [validity, setValidity] = useState<Record<string, boolean>>({});
   const [messages, setMessages] = useState<Record<string, string>>({});
-  const [validationEpoch, setValidationEpoch] = useState(0);
   const [showOwnerPassword, setShowOwnerPassword] = useState(false);
   const [bootstrapBusy, setBootstrapBusy] = useState(false);
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [bootstrapPhase, setBootstrapPhase] = useState<BootstrapPhase>("idle");
   const [completedBootstrapSteps, setCompletedBootstrapSteps] = useState<string[]>([]);
   const [deploymentUrl, setDeploymentUrl] = useState("");
+  const [postBootstrapWarning, setPostBootstrapWarning] = useState<string | null>(null);
   const [appValues, setAppValues] = useState<Record<string, string | null>>({});
   const [appValidity, setAppValidity] = useState<Record<string, boolean>>({});
   const [savingApps, setSavingApps] = useState(false);
+
+  // B-03: per-key epochs em useRef. O guard antigo lia validationEpoch do mesmo
+  // closure do render → comparação sempre igual → nunca filtrava resposta atrasada.
+  // Com ref, o `.then` lê o valor ATUAL no momento da resolução.
+  const epochsRef = useRef<Record<string, number>>({});
+  // B-04: per-key debounce timers. Antes, qualquer keystroke reschedulava timers
+  // para TODOS os campos com valor — re-pingando Vercel/Supabase a cada tecla.
+  const timersRef = useRef<Record<string, number>>({});
 
   // Refs estáveis: sem useCallback, o CredentialField recebe um callback novo a cada
   // render do SetupPage, o que reentra no useEffect dele e re-valida em loop (a cada
@@ -271,48 +333,109 @@ export function SetupPage() {
   }, [step2]);
 
   useEffect(() => {
+    persistStep(step);
+  }, [step]);
+
+  // B-04: agendamento de validação POR CAMPO. Substitui o useEffect-com-step2 que
+  // re-disparava timers para todos os campos a cada tecla.
+  const scheduleValidation = useCallback((key: Step2Key, nextValues: Step2Values) => {
+    window.clearTimeout(timersRef.current[key]);
+    if (!nextValues[key].trim()) return;
+    timersRef.current[key] = window.setTimeout(async () => {
+      const myEpoch = (epochsRef.current[key] = (epochsRef.current[key] ?? 0) + 1);
+      try {
+        const result = await validateStep2Field(key, nextValues);
+        // B-03: comparação real — `.current` é lido no momento da resolução.
+        if (epochsRef.current[key] !== myEpoch) return;
+        setValidity((current) => ({ ...current, [key]: result.ok }));
+        setMessages((current) => ({ ...current, [key]: result.message ?? "" }));
+      } catch (err) {
+        if (epochsRef.current[key] !== myEpoch) return;
+        setValidity((current) => ({ ...current, [key]: false }));
+        setMessages((current) => ({
+          ...current,
+          [key]: err instanceof Error ? err.message : "Falha ao validar",
+        }));
+      }
+    }, 800);
+  }, []);
+
+  const handleStep2Change = useCallback(
+    (key: Step2Key, value: string) => {
+      setStep2((current) => {
+        const next = { ...current, [key]: value };
+        // Reset local imediato + agendamento APENAS para o campo alterado.
+        setValidity((v) => ({ ...v, [key]: false }));
+        // B-14: limpa a mensagem antiga quando o usuário começa a digitar de novo
+        // (e quando esvazia o campo) — sem isso, erro velho fica visível em cinza.
+        setMessages((m) => ({ ...m, [key]: "" }));
+        scheduleValidation(key, next);
+        // Anon/service role dependem da URL; PAT também faz probe melhor com URL.
+        if (key === "supabase_url") {
+          if (next.supabase_anon_key.trim()) scheduleValidation("supabase_anon_key", next);
+          if (next.supabase_service_role_key.trim()) scheduleValidation("supabase_service_role_key", next);
+          if (next.supabase_pat.trim()) scheduleValidation("supabase_pat", next);
+        }
+        return next;
+      });
+    },
+    [scheduleValidation]
+  );
+
+  // B-15: re-valida campos hidratados de localStorage ao ENTRAR no Step 2.
+  // Sem isso o botão "Configurar" fica desabilitado mesmo com valores válidos.
+  useEffect(() => {
     if (step !== 2) return;
-    const epoch = validationEpoch;
-    const timers: number[] = [];
     for (const [key] of step2Fields) {
-      const value = step2[key];
-      if (!value.trim()) continue;
-      const timer = window.setTimeout(() => {
-        void validateStep2Field(key, step2).then((result) => {
-          if (epoch !== validationEpoch) return;
-          setValidity((current) => ({ ...current, [key]: result.ok }));
-          setMessages((current) => ({ ...current, [key]: result.message ?? "" }));
-        }).catch((err: unknown) => {
-          if (epoch !== validationEpoch) return;
-          setValidity((current) => ({ ...current, [key]: false }));
-          setMessages((current) => ({
-            ...current,
-            [key]: err instanceof Error ? err.message : "Falha ao validar",
-          }));
-        });
-      }, 800);
-      timers.push(timer);
+      if (step2[key].trim() && validity[key] !== true) {
+        scheduleValidation(key, step2);
+      }
     }
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
-  }, [step, step2, step2Fields, validationEpoch]);
+    // Intencionalmente sem `step2` nas deps — só roda quando entra no step.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, scheduleValidation, step2Fields]);
+
+  // Limpa timers pendentes ao desmontar.
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => {
+      for (const id of Object.values(timers)) window.clearTimeout(id);
+    };
+  }, []);
 
   // Ao chegar no Step 4, verifica se há sessão (o login automático pode ter ocorrido
   // no fim do Step 3, ou a sessão foi persistida pelo client Supabase).
   useEffect(() => {
     if (step !== 4) return;
     let active = true;
-    void supabase.auth.getSession().then(({ data }) => {
-      if (!active) return;
-      setStep4Session(Boolean(data.session));
-      if (!data.session) {
-        const persisted = loadStep2();
-        if (persisted?.owner_email) setLoginEmail(persisted.owner_email);
-      }
-    });
+    void supabase.auth.getSession()
+      .then(({ data }) => {
+        if (!active) return;
+        setStep4Session(Boolean(data.session));
+        if (!data.session) {
+          const persisted = loadStep2();
+          if (persisted?.owner_email) setLoginEmail(persisted.owner_email);
+        }
+      })
+      .catch(() => {
+        // Client com envs placeholder pode rejeitar — trata como sem sessão.
+        if (!active) return;
+        setStep4Session(false);
+      });
     return () => {
       active = false;
     };
   }, [step]);
+
+  // B-12: se o sign-in automático falhou e a senha ainda está em memória,
+  // pré-preenche o login manual.
+  useEffect(() => {
+    if (step !== 4) return;
+    if (step4Session !== false) return;
+    if (step2.owner_password && !loginPassword) {
+      setLoginPassword(step2.owner_password);
+    }
+  }, [step, step4Session, step2.owner_password, loginPassword]);
 
   async function runBootstrap() {
     setStep(3);
@@ -320,6 +443,7 @@ export function SetupPage() {
     setBootstrapError(null);
     setBootstrapPhase("bootstrapping");
     setDeploymentUrl("");
+    setPostBootstrapWarning(null);
     try {
       const res = await fetch("/api/bootstrap", {
         method: "POST",
@@ -331,15 +455,11 @@ export function SetupPage() {
         throw new Error(data.message ?? "Falha no bootstrap");
       }
       setCompletedBootstrapSteps(data.steps_completed ?? []);
-      if (data.deployment_url) {
-        setDeploymentUrl(
-          String(data.deployment_url).startsWith("http")
-            ? String(data.deployment_url)
-            : `https://${data.deployment_url}`
-        );
-      }
+      const normalizedDeploymentUrl = data.deployment_url ? ensureHttps(String(data.deployment_url)) : "";
+      if (normalizedDeploymentUrl) setDeploymentUrl(normalizedDeploymentUrl);
       setBootstrapPhase("waiting-redeploy");
-      await waitForHealth(300000, 3000, data.deployment_url ? String(data.deployment_url) : undefined);
+      // B-01: passa o URL já normalizado (com https://) — não o valor cru.
+      await waitForHealth(300000, 3000, normalizedDeploymentUrl || undefined);
       setBootstrapPhase("ready");
 
       // Tenta autenticar o owner recém-criado enquanto a senha ainda está em memória.
@@ -347,19 +467,32 @@ export function SetupPage() {
       // primeira execução o client roda com envs placeholder — o login falha em
       // silêncio e o Step 4 pede login manual após o redeploy. A sessão, se criada,
       // é persistida pelo client Supabase e sobrevive ao reload abaixo.
+      let signInOk = false;
       if (isSupabaseConfigured && step2.owner_email && step2.owner_password) {
         try {
-          await supabase.auth.signInWithPassword({
+          const { error } = await supabase.auth.signInWithPassword({
             email: step2.owner_email.trim(),
             password: step2.owner_password,
           });
+          signInOk = !error;
+          // B-12: não engole erro — só vira "OK falha silenciosa" no caso esperado
+          // de envs placeholder (que não devem ter chegado aqui depois do redeploy).
+          if (error && isSupabaseConfigured) {
+            setPostBootstrapWarning(
+              `O bootstrap funcionou, mas o login automático falhou (${error.message}). ` +
+                `Sua senha do owner ainda está nesta tela — copie agora antes de avançar:\n${step2.owner_password}`
+            );
+          }
         } catch {
           /* Step 4 fará login manual */
         }
       }
 
-      // Limpa a senha da memória imediatamente após a tentativa de login.
-      setStep2((current) => ({ ...current, owner_password: "" }));
+      // Só limpa a senha se a sessão foi criada com sucesso — assim o Step 4 manual
+      // consegue pré-preencher o campo se algo der errado.
+      if (signInOk) {
+        setStep2((current) => ({ ...current, owner_password: "" }));
+      }
       window.location.href = "/setup?step=4";
     } catch (err) {
       setBootstrapError(err instanceof Error ? err.message : "Falha no bootstrap");
@@ -367,6 +500,18 @@ export function SetupPage() {
     } finally {
       setBootstrapBusy(false);
     }
+  }
+
+  function goBackToStep2FromStep3() {
+    // B-07: caminho de volta quando o bootstrap falha (PAT errada, vercel token sem
+    // permissão, etc). Mantém o state e os campos sensíveis em memória, só não
+    // permite voltar enquanto o bootstrap está rodando.
+    if (bootstrapBusy) return;
+    setBootstrapError(null);
+    setBootstrapPhase("idle");
+    setCompletedBootstrapSteps([]);
+    setDeploymentUrl("");
+    setStep(2);
   }
 
   async function loginAtStep4() {
@@ -489,11 +634,7 @@ export function SetupPage() {
                   <input
                     type={isOwnerPassword ? (showOwnerPassword ? "text" : "password") : isPassword ? "password" : "text"}
                     value={step2[key]}
-                    onChange={(event) => {
-                      setStep2((current) => ({ ...current, [key]: event.target.value }));
-                      setValidity((current) => ({ ...current, [key]: false }));
-                      setValidationEpoch((current) => current + 1);
-                    }}
+                    onChange={(event) => handleStep2Change(key, event.target.value)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" && allStep2Valid) runBootstrap();
                     }}
@@ -535,42 +676,57 @@ export function SetupPage() {
       "Aguardando aplicação reiniciar",
     ];
     const vercelHref = deploymentUrl || "https://vercel.com/dashboard";
+    // Estado "ocioso" no Step 3 = usuário caiu aqui via refresh ou Voltar mas não
+    // disparou o bootstrap nesta sessão. Mostrar instrução clara em vez de
+    // timeline vazia (ver Issue 002 / B-05).
+    const idleOnStep3 = !bootstrapBusy && bootstrapPhase === "idle" && !bootstrapError && completedBootstrapSteps.length === 0;
     return (
       <SetupShell step={3}>
         <h1 className="mb-2 text-[28px] font-semibold text-[#F8FAFC]">Bootstrap em execução</h1>
         <p className="mb-8 text-base leading-[1.6] text-[#94A3B8]">
           Esta etapa configura a instância isolada do aluno.
         </p>
-        <div className="grid gap-3">
-          {timeline.map((item, index) => {
-            const isWaitingRestart = index === timeline.length - 1;
-            const done = isWaitingRestart
-              ? bootstrapPhase === "ready"
-              : index < completedBootstrapSteps.length ||
-                (bootstrapPhase !== "bootstrapping" && completedBootstrapSteps.length > 0);
-            const active =
-              !done &&
-              bootstrapBusy &&
-              ((isWaitingRestart && bootstrapPhase === "waiting-redeploy") ||
-                (!isWaitingRestart && bootstrapPhase === "bootstrapping"));
-            return (
-              <div key={item} className="flex items-center gap-3 rounded-xl border border-[rgba(59,130,246,0.12)] bg-[rgba(255,255,255,0.02)] p-4">
-                {done ? (
-                  <Check className="h-5 w-5 text-[#10B981]" />
-                ) : active ? (
-                  <Loader2 className="h-5 w-5 animate-spin text-[#60A5FA]" />
-                ) : (
-                  <div className="h-5 w-5 rounded-full border border-[rgba(96,165,250,0.35)]" />
-                )}
-                <span className="text-sm text-[#CBD5E1]">
-                  {isWaitingRestart && bootstrapPhase === "waiting-redeploy"
-                    ? "Aguardando aplicação reiniciar..."
-                    : item}
-                </span>
-              </div>
-            );
-          })}
-        </div>
+        {idleOnStep3 ? (
+          <div className="rounded-xl border border-[rgba(59,130,246,0.3)] bg-[rgba(30,58,138,0.25)] p-5 text-sm leading-6 text-[#CBD5E1]">
+            <p className="font-medium text-[#F8FAFC]">Bootstrap não está rodando nesta aba.</p>
+            <p className="mt-2 text-[#CBD5E1]">
+              Se você atualizou a página, volte ao Step 2 e reconfirme os tokens
+              (eles não ficam em memória por segurança). O backend é idempotente —
+              steps que já rodaram não rodam de novo.
+            </p>
+          </div>
+        ) : (
+          <div className="grid gap-3">
+            {timeline.map((item, index) => {
+              const isWaitingRestart = index === timeline.length - 1;
+              const done = isWaitingRestart
+                ? bootstrapPhase === "ready"
+                : index < completedBootstrapSteps.length ||
+                  (bootstrapPhase !== "bootstrapping" && completedBootstrapSteps.length > 0);
+              const active =
+                !done &&
+                bootstrapBusy &&
+                ((isWaitingRestart && bootstrapPhase === "waiting-redeploy") ||
+                  (!isWaitingRestart && bootstrapPhase === "bootstrapping"));
+              return (
+                <div key={item} className="flex items-center gap-3 rounded-xl border border-[rgba(59,130,246,0.12)] bg-[rgba(255,255,255,0.02)] p-4">
+                  {done ? (
+                    <Check className="h-5 w-5 text-[#10B981]" />
+                  ) : active ? (
+                    <Loader2 className="h-5 w-5 animate-spin text-[#60A5FA]" />
+                  ) : (
+                    <div className="h-5 w-5 rounded-full border border-[rgba(96,165,250,0.35)]" />
+                  )}
+                  <span className="text-sm text-[#CBD5E1]">
+                    {isWaitingRestart && bootstrapPhase === "waiting-redeploy"
+                      ? "Aguardando aplicação reiniciar..."
+                      : item}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
         {bootstrapPhase === "waiting-redeploy" && (
           <div className="mt-5 rounded-xl border border-[rgba(59,130,246,0.3)] bg-[rgba(30,58,138,0.25)] p-4 text-sm leading-6 text-[#CBD5E1]">
             O redeploy já foi disparado. O wizard vai avançar automaticamente quando
@@ -593,18 +749,37 @@ export function SetupPage() {
             )}
           </div>
         )}
-        <div className="mt-8 flex justify-end">
-          <PrimaryButton onClick={() => {
-            if (bootstrapPhase === "ready") {
-              window.location.href = "/setup?step=4";
-            } else {
-              runBootstrap();
-            }
-          }} disabled={bootstrapBusy}>
-            {bootstrapBusy ? "Configurando..."
-              : bootstrapPhase === "ready" ? "Ir para o próximo passo"
-              : bootstrapError ? "Tentar de novo"
-              : "Continuar"}
+        {postBootstrapWarning && (
+          <div className="mt-5 whitespace-pre-wrap rounded-xl border border-[#F59E0B]/40 bg-[#F59E0B]/10 p-4 text-sm leading-6 text-[#F59E0B]">
+            {postBootstrapWarning}
+          </div>
+        )}
+        <div className="mt-8 flex items-center justify-between gap-3">
+          <SecondaryButton onClick={goBackToStep2FromStep3} disabled={bootstrapBusy}>
+            <span className="flex items-center gap-2">
+              <ArrowLeft className="h-4 w-4" />
+              Voltar para credenciais
+            </span>
+          </SecondaryButton>
+          <PrimaryButton
+            onClick={() => {
+              if (bootstrapPhase === "ready") {
+                window.location.href = "/setup?step=4";
+              } else {
+                runBootstrap();
+              }
+            }}
+            disabled={bootstrapBusy}
+          >
+            {bootstrapBusy
+              ? "Configurando..."
+              : bootstrapPhase === "ready"
+                ? "Ir para o próximo passo"
+                : bootstrapError
+                  ? "Tentar de novo"
+                  : idleOnStep3
+                    ? "Reenviar credenciais"
+                    : "Continuar"}
           </PrimaryButton>
         </div>
       </SetupShell>

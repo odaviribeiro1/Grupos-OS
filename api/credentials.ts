@@ -11,7 +11,7 @@ import { createCipheriv, randomBytes } from "node:crypto";
 const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH = 12;
 
-type AuthResult = { userId: string } | { error: 401 | 403; message: string };
+type AuthResult = { userId: string } | { error: 401 | 403 | 500; message: string };
 
 function json(res: VercelResponse, status: number, body: unknown) {
   res.status(status).json(body);
@@ -109,12 +109,21 @@ async function validateAppCredential(
       if (!/^sk-/i.test(v)) {
         return { ok: false, message: "A chave OpenAI deve começar com sk-" };
       }
-      const res = await fetch("https://api.openai.com/v1/models", {
-        headers: { Authorization: `Bearer ${v}` },
-      });
-      return res.ok
-        ? { ok: true }
-        : { ok: false, message: "Chave OpenAI inválida ou sem permissão" };
+      try {
+        const res = await fetch("https://api.openai.com/v1/models", {
+          headers: { Authorization: `Bearer ${v}` },
+          // Sem timeout, a function pode segurar até bater no limite de 300s.
+          signal: AbortSignal.timeout(8000),
+        });
+        return res.ok
+          ? { ok: true }
+          : { ok: false, message: "Chave OpenAI inválida ou sem permissão" };
+      } catch (err) {
+        if (err instanceof Error && err.name === "TimeoutError") {
+          return { ok: false, message: "OpenAI demorou para responder. Tente novamente." };
+        }
+        return { ok: false, message: "Falha ao validar chave OpenAI" };
+      }
     }
     case "uazapi_api_url":
       return /^https?:\/\/\S+\.\S+/i.test(v.replace(/\/+$/, ""))

@@ -34,6 +34,9 @@ export function CredentialField({
   useEffect(() => {
     if (!editing || !value.trim()) {
       setValidation("idle");
+      // B-14: limpa a mensagem de erro antiga ao esvaziar o input — sem isso
+      // o usuário vê o erro anterior em cinza pairando sobre um campo vazio.
+      setMessage(null);
       onValidationChange?.(field.key, initialHasValue && !editing);
       return;
     }

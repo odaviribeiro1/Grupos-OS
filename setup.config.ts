@@ -24,12 +24,21 @@ async function validateOpenAI(value: string): Promise<CredentialValidationResult
   if (!/^sk-/i.test(value.trim())) {
     return { ok: false, message: "A chave OpenAI deve começar com sk-" };
   }
-  const res = await fetch("https://api.openai.com/v1/models", {
-    headers: { Authorization: `Bearer ${value.trim()}` },
-  });
-  return res.ok
-    ? { ok: true }
-    : { ok: false, message: "Chave OpenAI inválida ou sem permissão" };
+  try {
+    const res = await fetch("https://api.openai.com/v1/models", {
+      headers: { Authorization: `Bearer ${value.trim()}` },
+      // Sem timeout, o "Salvar e finalizar" trava se a OpenAI estiver lenta.
+      signal: AbortSignal.timeout(8000),
+    });
+    return res.ok
+      ? { ok: true }
+      : { ok: false, message: "Chave OpenAI inválida ou sem permissão" };
+  } catch (err) {
+    if (err instanceof Error && err.name === "TimeoutError") {
+      return { ok: false, message: "OpenAI demorou para responder. Tente novamente." };
+    }
+    return { ok: false, message: "Falha ao validar chave OpenAI" };
+  }
 }
 
 export const setupConfig: SetupConfig = {
