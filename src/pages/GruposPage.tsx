@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
+  AlertTriangle,
   Plus,
   Search,
+  Trash2,
   Users2,
   MessageSquare,
   Power,
@@ -16,6 +18,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Card } from "@/components/ui/Card";
 import { PageHeader } from "@/pages/placeholder";
+import { toast } from "@/components/ui/Toast";
 
 type Group = {
   id: string;
@@ -267,10 +270,84 @@ function AddGroupModal({
   );
 }
 
+function DeleteGroupDialog({
+  group,
+  onClose,
+  onDeleted,
+}: {
+  group: Group | null;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function confirm() {
+    if (!group) return;
+    setBusy(true);
+    // ON DELETE CASCADE em groups → messages/group_rules/group_participants/
+    // summaries/etc são apagados junto. RLS `groups_owner_all` cobre o DELETE.
+    const { error } = await supabase.from("groups").delete().eq("id", group.id);
+    setBusy(false);
+    if (error) {
+      toast(`Falha ao excluir: ${error.message}`, "error");
+      return;
+    }
+    toast(`Grupo "${group.name}" removido.`, "success");
+    onDeleted();
+    onClose();
+  }
+
+  if (!group) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onClick={() => {
+        if (!busy) onClose();
+      }}
+    >
+      <Card className="w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-4 flex items-start gap-3">
+          <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-danger/40 bg-danger/10 text-danger">
+            <AlertTriangle className="h-4 w-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-base font-semibold text-ink-50">
+              Excluir grupo monitorado
+            </h2>
+            <p className="mt-1 text-[13px] leading-5 text-ink-400">
+              Você vai remover <span className="font-semibold text-ink-50">{group.name}</span> da
+              ferramenta. Mensagens armazenadas, resumos, regras e knowledge base
+              vinculados a esse grupo serão apagados — isso não pode ser desfeito.
+              O grupo no WhatsApp não é afetado.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-6 flex items-center justify-end gap-2">
+          <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
+            Cancelar
+          </Button>
+          <button
+            type="button"
+            onClick={confirm}
+            disabled={busy}
+            className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-danger/50 bg-danger/15 px-4 text-sm font-medium text-danger transition-all hover:bg-danger/25 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Trash2 className="h-4 w-4" />
+            {busy ? "Excluindo..." : "Excluir grupo"}
+          </button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 export function GruposPage() {
   const { groups, loading, reload } = useGroups();
   const [filter, setFilter] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<Group | null>(null);
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -333,28 +410,45 @@ export function GruposPage() {
         {filtered.map((g) => (
           <Link key={g.id} to={`/grupos/${g.id}`}>
             <Card hover className="flex flex-col gap-3">
-              <div className="flex items-start justify-between">
+              <div className="flex items-start justify-between gap-3">
                 <h3 className="truncate text-sm font-semibold text-ink-50">
                   {g.name}
                 </h3>
-                <span
-                  className={cn(
-                    "flex h-6 items-center gap-1 rounded-full px-2 text-[10px] font-medium uppercase tracking-wider",
-                    g.is_active
-                      ? "bg-success/10 text-success border border-success/30"
-                      : "bg-ink-400/10 text-ink-400 border border-ink-400/20"
-                  )}
-                >
-                  {g.is_active ? (
-                    <>
-                      <Power className="h-3 w-3" /> Ativo
-                    </>
-                  ) : (
-                    <>
-                      <PowerOff className="h-3 w-3" /> Inativo
-                    </>
-                  )}
-                </span>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span
+                    className={cn(
+                      "flex h-6 items-center gap-1 rounded-full px-2 text-[10px] font-medium uppercase tracking-wider",
+                      g.is_active
+                        ? "bg-success/10 text-success border border-success/30"
+                        : "bg-ink-400/10 text-ink-400 border border-ink-400/20"
+                    )}
+                  >
+                    {g.is_active ? (
+                      <>
+                        <Power className="h-3 w-3" /> Ativo
+                      </>
+                    ) : (
+                      <>
+                        <PowerOff className="h-3 w-3" /> Inativo
+                      </>
+                    )}
+                  </span>
+                  <button
+                    type="button"
+                    aria-label={`Excluir grupo ${g.name}`}
+                    title="Excluir grupo"
+                    onClick={(event) => {
+                      // O Card está dentro de <Link>; sem isso o click navega
+                      // pra tela do grupo e o modal nem chega a abrir.
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setPendingDelete(g);
+                    }}
+                    className="flex h-6 w-6 items-center justify-center rounded-md text-ink-400 transition-colors hover:bg-danger/10 hover:text-danger"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
               <div className="flex items-center gap-4 text-xs text-ink-400">
                 <span className="flex items-center gap-1">
@@ -375,6 +469,12 @@ export function GruposPage() {
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         onAdded={reload}
+      />
+
+      <DeleteGroupDialog
+        group={pendingDelete}
+        onClose={() => setPendingDelete(null)}
+        onDeleted={reload}
       />
     </>
   );
