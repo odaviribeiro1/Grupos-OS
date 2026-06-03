@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Check, Copy, Loader2, RefreshCw, Save, Webhook } from "lucide-react";
+import { Check, Copy, Loader2, RefreshCw, Save, Webhook, Zap } from "lucide-react";
 import { setupConfig } from "../../../setup.config";
 import { CredentialField } from "@/components/credentials/CredentialField";
 import { toast } from "@/components/ui/Toast";
@@ -146,6 +146,40 @@ function WebhookCard() {
     }
   }
 
+  const [applying, setApplying] = useState(false);
+  const [applyResult, setApplyResult] = useState<{ success: boolean; tried?: Array<{ endpoint: string; status: number; body: string }> } | null>(null);
+
+  // Configura o webhook AUTOMATICAMENTE na UAZAPI usando o instance_token salvo
+  // em app_settings. Tenta /webhook e /instance/updateWebhook em sequência
+  // (variações conhecidas da v2). Resposta mostra qual endpoint aceitou.
+  async function applyToUazapi() {
+    if (!url) return;
+    setApplying(true);
+    setApplyResult(null);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Sessão expirada.");
+      const res = await fetch("/api/uazapi-webhook", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ webhook_url: url }),
+      });
+      const data = await res.json();
+      setApplyResult({ success: Boolean(data.success), tried: data.tried });
+      toast(
+        data.success ? "Webhook configurado na UAZAPI." : data.message ?? "Falha ao configurar",
+        data.success ? "success" : "error"
+      );
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Falha ao configurar webhook", "error");
+    } finally {
+      setApplying(false);
+    }
+  }
+
   // Manda um POST pra própria URL do webhook simulando UAZAPI. Se chegar até a
   // Edge Function, a resposta vai indicar (ex: 400 "Missing chatId", ou 200
   // "ignored: not a group message" pra payload mínimo). Qualquer resposta
@@ -227,7 +261,42 @@ function WebhookCard() {
             "Testar URL"
           )}
         </button>
+        <button
+          type="button"
+          onClick={applyToUazapi}
+          disabled={applying}
+          className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg bg-[linear-gradient(135deg,#1E3A8A_0%,#3B82F6_100%)] px-4 text-sm font-medium text-white shadow-[0_4px_20px_rgba(59,130,246,0.3)] transition-all duration-300 hover:shadow-[0_4px_30px_rgba(59,130,246,0.5)] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {applying ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Aplicando...
+            </>
+          ) : (
+            <>
+              <Zap className="h-4 w-4" />
+              Aplicar na UAZAPI
+            </>
+          )}
+        </button>
       </div>
+      {applyResult && applyResult.tried && (
+        <div className="mt-3 rounded-lg border border-[rgba(59,130,246,0.15)] bg-[rgba(0,0,0,0.25)] p-3 text-[12px] leading-5">
+          <p className="mb-1 font-medium text-[#CBD5E1]">
+            Tentativas:
+          </p>
+          <ul className="ml-4 list-disc space-y-1 font-mono text-[11px] text-[#94A3B8]">
+            {applyResult.tried.map((t, i) => (
+              <li key={i} className="break-all">
+                <span className={t.status >= 200 && t.status < 300 ? "text-[#10B981]" : "text-[#F59E0B]"}>
+                  [{t.status || "ERR"}]
+                </span>{" "}
+                {t.endpoint} — {t.body}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {testResult && (
         <div className="mt-3 rounded-lg border border-[rgba(59,130,246,0.15)] bg-[rgba(0,0,0,0.25)] p-3 text-[12px] leading-5">
           <p className="mb-1 font-medium text-[#CBD5E1]">
