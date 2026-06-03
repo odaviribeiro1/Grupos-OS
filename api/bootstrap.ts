@@ -329,11 +329,37 @@ async function triggerRedeploy(projectId: string, token: string) {
   });
   const latestText = await latest.text();
   if (!latest.ok) throw new Error(`Falha ao buscar deployment atual (${latest.status}): ${latestText}`);
-  const deployment = (JSON.parse(latestText) as { deployments?: Array<{ uid: string; url: string }> }).deployments?.[0];
+  const deployment = (JSON.parse(latestText) as {
+    deployments?: Array<{ uid: string; url: string; name?: string }>;
+  }).deployments?.[0];
   if (!deployment) throw new Error("Nenhum deployment Vercel encontrado para redeploy");
-  const res = await fetch(`https://api.vercel.com/v13/deployments/${deployment.uid}/redeploy`, {
+
+  // Vercel removeu POST /v13/deployments/{uid}/redeploy (retorna 404). O
+  // equivalente atual é POST /v13/deployments com {name, deploymentId} —
+  // cria uma deployment nova reusando o git source da deployment fonte.
+  // Precisamos do project NAME (não do ID); a list response normalmente já
+  // inclui, mas fazemos fallback explícito para /v9/projects/{id}.
+  let projectName = deployment.name;
+  if (!projectName) {
+    const projectRes = await fetch(`https://api.vercel.com/v9/projects/${projectId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!projectRes.ok) {
+      throw new Error(`Falha ao buscar projeto Vercel (${projectRes.status}): ${await projectRes.text()}`);
+    }
+    const projectData = (await projectRes.json()) as { name?: string };
+    projectName = projectData.name;
+  }
+  if (!projectName) throw new Error("Nome do projeto Vercel não encontrado para redeploy");
+
+  const res = await fetch(`https://api.vercel.com/v13/deployments`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: projectName,
+      deploymentId: deployment.uid,
+      target: "production",
+    }),
   });
   const text = await res.text();
   if (!res.ok) throw new Error(`Falha ao disparar redeploy (${res.status}): ${text}`);
