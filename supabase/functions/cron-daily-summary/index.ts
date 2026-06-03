@@ -20,148 +20,199 @@ function json(body: unknown, status = 200) {
   });
 }
 
+type Schedule = {
+  id: string;
+  group_id: string;
+  enabled: boolean;
+  frequency: "daily" | "weekly" | "monthly";
+  hour: number;
+  day_of_week: number | null;
+  day_of_month: number | null;
+  send_to_group: boolean;
+  last_run_at: string | null;
+};
+
+// Hora ATUAL em Brasília (UTC-3, sem horário de verão desde 2019). Retorna os
+// componentes que precisamos pra decidir match: hora cheia (0-23), dia da
+// semana (0=domingo) e dia do mês (1-31).
+function brasiliaNow(): { hour: number; dayOfWeek: number; dayOfMonth: number } {
+  const nowUtc = new Date();
+  const brasilia = new Date(nowUtc.getTime() - 3 * 60 * 60 * 1000);
+  return {
+    hour: brasilia.getUTCHours(),
+    dayOfWeek: brasilia.getUTCDay(),
+    dayOfMonth: brasilia.getUTCDate(),
+  };
+}
+
+function scheduleMatches(s: Schedule, now: { hour: number; dayOfWeek: number; dayOfMonth: number }): boolean {
+  if (s.hour !== now.hour) return false;
+  if (s.frequency === "daily") return true;
+  if (s.frequency === "weekly") return s.day_of_week === now.dayOfWeek;
+  if (s.frequency === "monthly") return s.day_of_month === now.dayOfMonth;
+  return false;
+}
+
+// Janela do resumo pra cada frequência. Daily reusa "today" (lógica já testada
+// no generate-summary). Weekly/monthly usam custom: 7 ou 30 dias até agora.
+function periodWindow(frequency: Schedule["frequency"]):
+  | { period_type: "today" }
+  | { period_type: "custom"; period_start: string; period_end: string } {
+  if (frequency === "daily") return { period_type: "today" };
+  const end = new Date();
+  const start = new Date(end);
+  if (frequency === "weekly") start.setDate(start.getDate() - 7);
+  else start.setDate(start.getDate() - 30);
+  return {
+    period_type: "custom",
+    period_start: start.toISOString(),
+    period_end: end.toISOString(),
+  };
+}
+
+// Idempotência: se last_run_at é da mesma hora cheia que agora, pula.
+// pg_net pode retry/duplicar — sem isso geramos resumos duplicados.
+function alreadyRanThisHour(lastRunAt: string | null): boolean {
+  if (!lastRunAt) return false;
+  const last = new Date(lastRunAt);
+  const now = new Date();
+  return (
+    last.getUTCFullYear() === now.getUTCFullYear() &&
+    last.getUTCMonth() === now.getUTCMonth() &&
+    last.getUTCDate() === now.getUTCDate() &&
+    last.getUTCHours() === now.getUTCHours()
+  );
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
-  // 1. Get all active groups
-  const { data: groups, error: groupsErr } = await supabase
-    .from("groups")
-    .select("id, name, whatsapp_group_id")
-    .eq("is_active", true);
+  const now = brasiliaNow();
 
-  if (groupsErr) {
-    console.error("Failed to fetch groups:", groupsErr);
-    return json({ error: "Failed to fetch groups" }, 500);
+  // Pega schedules habilitados que casam com a hora atual no SQL — reduz o
+  // trabalho do lado do JS e evita iterar grupos que não vão rodar agora.
+  const { data: schedules, error: schedErr } = await supabase
+    .from("group_summary_schedules")
+    .select("id, group_id, enabled, frequency, hour, day_of_week, day_of_month, send_to_group, last_run_at")
+    .eq("enabled", true)
+    .eq("hour", now.hour);
+
+  if (schedErr) {
+    console.error("Failed to fetch schedules:", schedErr);
+    return json({ error: "Failed to fetch schedules" }, 500);
   }
 
-  if (!groups || groups.length === 0) {
-    return json({ status: "ok", message: "No active groups", results: [] });
+  if (!schedules || schedules.length === 0) {
+    return json({ status: "ok", message: "No schedules match this hour", hour: now.hour });
   }
 
   const results: Array<{
+    schedule_id: string;
     group_id: string;
-    group_name: string;
+    matched: boolean;
     summary_generated: boolean;
     sent_to_group: boolean;
+    skipped_reason?: string;
     error?: string;
   }> = [];
 
-  for (const group of groups) {
-    const result = {
-      group_id: group.id,
-      group_name: group.name,
+  for (const raw of schedules) {
+    const s = raw as unknown as Schedule;
+    const matched = scheduleMatches(s, now);
+    const r = {
+      schedule_id: s.id,
+      group_id: s.group_id,
+      matched,
       summary_generated: false,
       sent_to_group: false,
+      skipped_reason: undefined as string | undefined,
       error: undefined as string | undefined,
     };
 
+    if (!matched) {
+      r.skipped_reason = "frequency/day mismatch";
+      results.push(r);
+      continue;
+    }
+
+    if (alreadyRanThisHour(s.last_run_at)) {
+      r.skipped_reason = "already ran this hour";
+      results.push(r);
+      continue;
+    }
+
+    // Confirma que o grupo ainda está ativo
+    const { data: group } = await supabase
+      .from("groups")
+      .select("id, is_active")
+      .eq("id", s.group_id)
+      .maybeSingle();
+
+    if (!group || !group.is_active) {
+      r.skipped_reason = "group inactive";
+      results.push(r);
+      continue;
+    }
+
     try {
-      // 2. Check if group has messages today
-      const now = new Date();
-      const brasiliaOffset = -3 * 60;
-      const localNow = new Date(
-        now.getTime() + (brasiliaOffset + now.getTimezoneOffset()) * 60000
-      );
-      const todayStart = new Date(localNow);
-      todayStart.setHours(0, 0, 0, 0);
-      const offset = (brasiliaOffset + now.getTimezoneOffset()) * 60000;
-      const todayStartUtc = new Date(todayStart.getTime() - offset).toISOString();
-
-      const { count } = await supabase
-        .from("messages")
-        .select("*", { count: "exact", head: true })
-        .eq("group_id", group.id)
-        .gte("message_timestamp", todayStartUtc)
-        .or("from_me.eq.false,was_sent_by_api.eq.false");
-
-      if (!count || count === 0) {
-        result.error = "No messages today";
-        results.push(result);
-        continue;
-      }
-
-      // Idempotência: se já existe resumo de hoje para o grupo, pula (o cron pode
-      // reexecutar/retry/timeout). Sem isso, gera e envia resumos duplicados.
-      const { data: existing } = await supabase
-        .from("summaries")
-        .select("id")
-        .eq("group_id", group.id)
-        .eq("period_type", "today")
-        .gte("period_start", todayStartUtc)
-        .limit(1)
-        .maybeSingle();
-      if (existing) {
-        result.error = "Summary already exists today (skipped)";
-        results.push(result);
-        continue;
-      }
-
-      // 3. Call generate-summary
+      const window = periodWindow(s.frequency);
       const genRes = await fetch(`${SUPABASE_URL}/functions/v1/generate-summary`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
         },
-        body: JSON.stringify({
-          group_id: group.id,
-          period_type: "today",
-        }),
+        body: JSON.stringify({ group_id: s.group_id, ...window }),
       });
-
       const genData = await genRes.json();
 
       if (!genRes.ok) {
-        result.error = `generate-summary: ${genData.error || genRes.status}`;
-        results.push(result);
+        r.error = `generate-summary: ${genData.error || genRes.status}`;
+        results.push(r);
         continue;
       }
 
-      result.summary_generated = true;
+      r.summary_generated = true;
       const summaryId = genData.summary_id;
 
-      // 4. Call send-summary-to-group
-      const sendRes = await fetch(
-        `${SUPABASE_URL}/functions/v1/send-summary-to-group`,
-        {
+      if (summaryId) {
+        await supabase
+          .from("summaries")
+          .update({ is_auto_generated: true })
+          .eq("id", summaryId);
+      }
+
+      if (s.send_to_group && summaryId) {
+        const sendRes = await fetch(`${SUPABASE_URL}/functions/v1/send-summary-to-group`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-            // Autentica como chamada interna confiável (ver send-summary-to-group).
+            // Autentica como chamada interna (ver send-summary-to-group)
             "x-internal-secret": Deno.env.get("CRYPTO_KEY") ?? "",
           },
           body: JSON.stringify({ summary_id: summaryId }),
+        });
+        const sendData = await sendRes.json();
+        if (sendRes.ok) {
+          r.sent_to_group = true;
+        } else {
+          r.error = `send-summary: ${sendData.error || sendRes.status}`;
         }
-      );
-
-      const sendData = await sendRes.json();
-
-      if (!sendRes.ok) {
-        result.error = `send-summary: ${sendData.error || sendRes.status}`;
-        results.push(result);
-        continue;
       }
 
-      result.sent_to_group = true;
-
-      // 5. Mark summary as auto-generated
       await supabase
-        .from("summaries")
-        .update({ is_auto_generated: true })
-        .eq("id", summaryId);
+        .from("group_summary_schedules")
+        .update({ last_run_at: new Date().toISOString() })
+        .eq("id", s.id);
     } catch (err) {
-      result.error = (err as Error).message;
+      r.error = (err as Error).message;
     }
 
-    results.push(result);
+    results.push(r);
   }
 
-  return json({
-    status: "ok",
-    processed: results.length,
-    results,
-  });
+  return json({ status: "ok", hour: now.hour, processed: results.length, results });
 });

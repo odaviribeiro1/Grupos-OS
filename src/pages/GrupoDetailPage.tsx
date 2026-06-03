@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
+  CalendarClock,
   Users2,
   MessagesSquare,
   Send,
@@ -508,6 +509,287 @@ function DiscussionsSection({
   );
 }
 
+type Schedule = {
+  id?: string;
+  group_id: string;
+  enabled: boolean;
+  frequency: "daily" | "weekly" | "monthly";
+  hour: number;
+  day_of_week: number | null;
+  day_of_month: number | null;
+  send_to_group: boolean;
+};
+
+const DAYS_OF_WEEK = [
+  { value: 0, label: "Domingo" },
+  { value: 1, label: "Segunda" },
+  { value: 2, label: "Terça" },
+  { value: 3, label: "Quarta" },
+  { value: 4, label: "Quinta" },
+  { value: 5, label: "Sexta" },
+  { value: 6, label: "Sábado" },
+];
+
+const HOURS = Array.from({ length: 24 }, (_, i) => i);
+
+function emptySchedule(groupId: string): Schedule {
+  return {
+    group_id: groupId,
+    enabled: true,
+    frequency: "daily",
+    hour: 9,
+    day_of_week: 1,
+    day_of_month: 1,
+    send_to_group: false,
+  };
+}
+
+function AutomationModal({
+  open,
+  onClose,
+  groupId,
+}: {
+  open: boolean;
+  onClose: () => void;
+  groupId: string;
+}) {
+  const [schedule, setSchedule] = useState<Schedule>(() => emptySchedule(groupId));
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setError(null);
+    setLoading(true);
+    void supabase
+      .from("group_summary_schedules")
+      .select("id, group_id, enabled, frequency, hour, day_of_week, day_of_month, send_to_group")
+      .eq("group_id", groupId)
+      .maybeSingle()
+      .then(({ data, error: e }) => {
+        if (e) setError(e.message);
+        if (data) setSchedule(data as Schedule);
+        else setSchedule(emptySchedule(groupId));
+        setLoading(false);
+      });
+  }, [open, groupId]);
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    // Normaliza dados auxiliares: zera os campos da frequência que NÃO é a
+    // escolhida (não vão ser usados pelo cron).
+    const payload: Schedule = {
+      ...schedule,
+      day_of_week: schedule.frequency === "weekly" ? (schedule.day_of_week ?? 1) : null,
+      day_of_month: schedule.frequency === "monthly" ? (schedule.day_of_month ?? 1) : null,
+    };
+    const { error: e } = await supabase
+      .from("group_summary_schedules")
+      .upsert(payload, { onConflict: "group_id" });
+    setSaving(false);
+    if (e) {
+      setError(e.message);
+      return;
+    }
+    onClose();
+  }
+
+  async function disable() {
+    if (!schedule.id) {
+      onClose();
+      return;
+    }
+    setSaving(true);
+    const { error: e } = await supabase
+      .from("group_summary_schedules")
+      .delete()
+      .eq("id", schedule.id);
+    setSaving(false);
+    if (e) {
+      setError(e.message);
+      return;
+    }
+    onClose();
+  }
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onClick={() => !saving && onClose()}
+    >
+      <Card className="w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-5 flex items-start gap-3">
+          <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-brand-500/40 bg-brand-500/10 text-brand-400">
+            <CalendarClock className="h-4 w-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-base font-semibold text-ink-50">
+              Automatizar resumo
+            </h2>
+            <p className="mt-1 text-[13px] leading-5 text-ink-400">
+              Gera resumo automático e, opcionalmente, envia no próprio grupo
+              do WhatsApp. Horário em Brasília (UTC-3).
+            </p>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="flex h-32 items-center justify-center">
+            <Loader2 className="h-5 w-5 animate-spin text-brand-400" />
+          </div>
+        ) : (
+          <div className="flex flex-col gap-4">
+            {/* Frequência */}
+            <div>
+              <label className="mb-1.5 block text-[12px] font-medium uppercase tracking-wider text-ink-400">
+                Frequência
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                {(["daily", "weekly", "monthly"] as const).map((f) => (
+                  <button
+                    key={f}
+                    type="button"
+                    onClick={() => setSchedule((s) => ({ ...s, frequency: f }))}
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-xs font-medium transition-all",
+                      schedule.frequency === f
+                        ? "border-brand-500/50 bg-brand-500/15 text-brand-400 shadow-[0_0_15px_rgba(59,130,246,0.15)]"
+                        : "border-brand-500/15 text-ink-400 hover:border-brand-500/30 hover:text-ink-200"
+                    )}
+                  >
+                    {f === "daily" ? "Diário" : f === "weekly" ? "Semanal" : "Mensal"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Dia da semana (weekly) */}
+            {schedule.frequency === "weekly" && (
+              <div>
+                <label className="mb-1.5 block text-[12px] font-medium uppercase tracking-wider text-ink-400">
+                  Dia da semana
+                </label>
+                <select
+                  value={schedule.day_of_week ?? 1}
+                  onChange={(e) => setSchedule((s) => ({ ...s, day_of_week: Number(e.target.value) }))}
+                  className="min-h-11 w-full rounded-lg border border-brand-500/20 bg-black/30 px-3 text-sm text-ink-50 focus:border-brand-500 focus:outline-none"
+                >
+                  {DAYS_OF_WEEK.map((d) => (
+                    <option key={d.value} value={d.value}>{d.label}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Dia do mês (monthly) */}
+            {schedule.frequency === "monthly" && (
+              <div>
+                <label className="mb-1.5 block text-[12px] font-medium uppercase tracking-wider text-ink-400">
+                  Dia do mês
+                </label>
+                <select
+                  value={schedule.day_of_month ?? 1}
+                  onChange={(e) => setSchedule((s) => ({ ...s, day_of_month: Number(e.target.value) }))}
+                  className="min-h-11 w-full rounded-lg border border-brand-500/20 bg-black/30 px-3 text-sm text-ink-50 focus:border-brand-500 focus:outline-none"
+                >
+                  {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+                    <option key={d} value={d}>Dia {d}</option>
+                  ))}
+                </select>
+                {schedule.day_of_month && schedule.day_of_month > 28 && (
+                  <p className="mt-1 text-[11px] text-ink-400">
+                    Em meses sem este dia (ex: 31 em fev), a execução é pulada.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Horário */}
+            <div>
+              <label className="mb-1.5 block text-[12px] font-medium uppercase tracking-wider text-ink-400">
+                Horário (Brasília)
+              </label>
+              <select
+                value={schedule.hour}
+                onChange={(e) => setSchedule((s) => ({ ...s, hour: Number(e.target.value) }))}
+                className="min-h-11 w-full rounded-lg border border-brand-500/20 bg-black/30 px-3 text-sm text-ink-50 focus:border-brand-500 focus:outline-none"
+              >
+                {HOURS.map((h) => (
+                  <option key={h} value={h}>
+                    {String(h).padStart(2, "0")}:00
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Enviar no grupo */}
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-brand-500/15 bg-black/20 p-3">
+              <input
+                type="checkbox"
+                checked={schedule.send_to_group}
+                onChange={(e) => setSchedule((s) => ({ ...s, send_to_group: e.target.checked }))}
+                className="mt-0.5 h-4 w-4 accent-brand-500"
+              />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-ink-100">
+                  Enviar resumo no grupo automaticamente
+                </p>
+                <p className="mt-0.5 text-[12px] text-ink-400">
+                  Depois de gerar, envia o resumo formatado direto no WhatsApp
+                  via UAZAPI.
+                </p>
+              </div>
+            </label>
+
+            {error && (
+              <p className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+                {error}
+              </p>
+            )}
+          </div>
+        )}
+
+        <div className="mt-6 flex items-center justify-between gap-2">
+          {schedule.id ? (
+            <Button variant="ghost" size="sm" onClick={disable} disabled={saving || loading}>
+              <Trash2 className="h-4 w-4" />
+              Desativar
+            </Button>
+          ) : (
+            <span />
+          )}
+          <div className="flex gap-2">
+            <Button variant="ghost" size="sm" onClick={onClose} disabled={saving}>
+              Cancelar
+            </Button>
+            <Button size="sm" onClick={save} disabled={saving || loading}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+              {saving ? "Salvando..." : "Salvar"}
+            </Button>
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function AutomationButton({ groupId }: { groupId: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
+        <CalendarClock className="h-4 w-4" />
+        Automatizar
+      </Button>
+      <AutomationModal open={open} onClose={() => setOpen(false)} groupId={groupId} />
+    </>
+  );
+}
+
 function SummarySection({
   groupId,
   period,
@@ -613,19 +895,22 @@ function SummarySection({
         <p className="text-sm text-ink-400">
           Nenhuma análise disponível para este período.
         </p>
-        <Button onClick={() => generateSummary()} disabled={analyzing}>
-          {analyzing ? (
-            <>
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Analisando...
-            </>
-          ) : (
-            <>
-              <Zap className="h-4 w-4" />
-              Analisar
-            </>
-          )}
-        </Button>
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          <Button onClick={() => generateSummary()} disabled={analyzing}>
+            {analyzing ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Analisando...
+              </>
+            ) : (
+              <>
+                <Zap className="h-4 w-4" />
+                Analisar
+              </>
+            )}
+          </Button>
+          <AutomationButton groupId={groupId} />
+        </div>
         {error && <p className="text-xs text-danger">{error}</p>}
       </Card>
     );
@@ -687,6 +972,7 @@ function SummarySection({
             )}
             Analisar
           </Button>
+          <AutomationButton groupId={groupId} />
         </div>
       </div>
 
