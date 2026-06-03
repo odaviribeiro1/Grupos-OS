@@ -114,19 +114,44 @@ async function fetchGroups(): Promise<UazapiGroup[]> {
   if (!res.ok) throw new Error(`UAZAPI /group/list falhou (${res.status}): ${text}`);
   const body = text ? JSON.parse(text) : [];
   const arr = Array.isArray(body) ? body : Array.isArray(body.groups) ? body.groups : [];
+
+  // UAZAPI v2 (Baileys) tem nomenclatura inconsistente entre instalações: algumas
+  // versões usam `JID`/`Participants`, outras `wa_chatid`/`wa_size` (prefixo wa_).
+  // Tenta todos os field names conhecidos antes de cair pra contar o array.
   return (arr as Record<string, unknown>[]).map((g) => {
     const participants = Array.isArray(g.Participants)
       ? (g.Participants as unknown[])
       : Array.isArray(g.participants)
         ? (g.participants as unknown[])
-        : null;
+        : Array.isArray(g.wa_participants)
+          ? (g.wa_participants as unknown[])
+          : null;
+
+    const count =
+      (g.participantsCount as number | undefined) ??
+      (g.ParticipantCount as number | undefined) ??
+      (g.wa_size as number | undefined) ??
+      (g.wa_count as number | undefined) ??
+      (g.size as number | undefined) ??
+      participants?.length ??
+      0;
+
     return {
-      id: (g.id as string) || (g.JID as string) || (g.jid as string) || "",
-      name: (g.name as string) || (g.Name as string) || (g.subject as string) || "(sem nome)",
-      participantsCount:
-        (g.participantsCount as number | undefined) ??
-        (g.ParticipantCount as number | undefined) ??
-        participants?.length,
+      id:
+        (g.wa_chatid as string) ||
+        (g.JID as string) ||
+        (g.jid as string) ||
+        (g.id as string) ||
+        (g.chatId as string) ||
+        "",
+      name:
+        (g.wa_name as string) ||
+        (g.wa_subject as string) ||
+        (g.subject as string) ||
+        (g.name as string) ||
+        (g.Name as string) ||
+        "(sem nome)",
+      participantsCount: count,
     };
   });
 }

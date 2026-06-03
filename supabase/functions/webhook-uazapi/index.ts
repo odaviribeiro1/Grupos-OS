@@ -30,6 +30,21 @@ async function logError(functionName: string, errorMessage: string, payload?: un
   } catch { /* best effort */ }
 }
 
+// Log diagnóstico de TODO POST recebido — sucesso, ignorado e erro. Usa o
+// function_name `webhook-uazapi:debug` para ficar fácil de filtrar no SQL
+// editor: `select * from grupos.error_logs where function_name like '%debug%'
+// order by created_at desc limit 20;`. Sem isso, payloads ignorados (chatId
+// não casa, tipo errado, etc.) sumiriam sem deixar rastro.
+async function debugLog(stage: string, ctx: Record<string, unknown>, payload?: unknown) {
+  try {
+    await supabase.from("error_logs").insert({
+      function_name: "webhook-uazapi:debug",
+      error_message: stage,
+      payload: { ctx, raw: payload },
+    });
+  } catch { /* best effort */ }
+}
+
 function sanitize(input: string): string {
   return input
     .replace(/</g, "&lt;")
@@ -151,8 +166,13 @@ Deno.serve(async (req) => {
   try {
     payload = await req.json();
   } catch {
+    await debugLog("invalid-json", { ip });
     return json({ error: "Invalid JSON" }, 400);
   }
+  // Log inicial: prova que UAZAPI está chamando o endpoint. Se essa linha não
+  // aparecer no error_logs após mandar mensagem no grupo, o webhook NÃO está
+  // sendo invocado (config errada na UAZAPI, URL errada, etc.).
+  await debugLog("received", { ip, event_type: payload.EventType ?? payload.event ?? null }, payload);
 
   // UAZAPI v2 manda payload aninhado: { EventType, chat: {...}, message: {...} }
   // Versões antigas mandavam flat ou em `data`. Suportamos os 3 formatos.
@@ -163,11 +183,11 @@ Deno.serve(async (req) => {
     payload;
 
   const chatId =
+    (chat?.wa_chatid as string) ||
     (data.chatId as string) ||
     (data.chat_id as string) ||
     (data.chatid as string) ||
     (data.remoteJid as string) ||
-    (chat?.wa_chatid as string) ||
     (chat?.id as string) ||
     "";
 
@@ -178,6 +198,7 @@ Deno.serve(async (req) => {
     chat?.wa_isGroup === true ||
     chatId.endsWith("@g.us");
   if (!isGroup) {
+    await debugLog("ignored:not-a-group", { chatId, has_chat_field: Boolean(chat) });
     return json({ status: "ignored", reason: "not a group message" });
   }
 
@@ -204,10 +225,12 @@ Deno.serve(async (req) => {
     messageType === "vote" ||
     messageType === "convertOptions"
   ) {
+    await debugLog("ignored:filtered-type", { chatId, messageType });
     return json({ status: "ignored", reason: `messageType: ${messageType}` });
   }
 
   if (!chatId) {
+    await debugLog("error:missing-chatid", { rawType, data_keys: Object.keys(data), chat_keys: chat ? Object.keys(chat) : null });
     return json({ error: "Missing chatId" }, 400);
   }
 
@@ -225,6 +248,17 @@ Deno.serve(async (req) => {
   }
 
   if (!group) {
+    // Diagnóstico crítico: lista o que está no DB pra comparar com o chatId
+    // recebido. Se UAZAPI manda 554199...@g.us mas o DB tem o mesmo número
+    // sem @g.us, dá pra ver aqui.
+    const { data: knownGroups } = await supabase
+      .from("groups")
+      .select("whatsapp_group_id, is_active")
+      .limit(20);
+    await debugLog("ignored:group-not-monitored", {
+      received_chatId: chatId,
+      known_in_db: knownGroups ?? [],
+    });
     return json({ status: "ignored", reason: "group not monitored or inactive" });
   }
 

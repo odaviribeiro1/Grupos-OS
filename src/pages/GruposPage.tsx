@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   AlertTriangle,
+  Loader2,
   Plus,
+  RefreshCw,
   Search,
   Trash2,
   Users2,
@@ -162,6 +164,23 @@ function AddGroupModal({
       setError(data?.message ?? "Falha ao salvar grupos");
       setSaving(false);
       return;
+    }
+
+    // Auto-sync: /group/list pode não trazer Participants embarcados em algumas
+    // versões da UAZAPI — disparamos sync-participants pra cada novo grupo
+    // (busca contagem fresca + popula group_participants). Best effort: se
+    // falhar, o usuário ainda pode clicar no botão Sync no card depois.
+    try {
+      const { data: inserted } = await supabase
+        .from("groups")
+        .select("id")
+        .in("whatsapp_group_id", selected);
+      const ids = (inserted ?? []).map((g) => g.id);
+      await Promise.allSettled(
+        ids.map((id) => supabase.functions.invoke("sync-participants", { body: { group_id: id } }))
+      );
+    } catch {
+      /* silent — UI continua, count fica 0 até o user clicar Sync */
     }
 
     setSaving(false);
@@ -348,12 +367,33 @@ export function GruposPage() {
   const [filter, setFilter] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<Group | null>(null);
+  const [syncing, setSyncing] = useState<Record<string, boolean>>({});
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return groups;
     return groups.filter((g) => g.name.toLowerCase().includes(q));
   }, [groups, filter]);
+
+  async function syncParticipants(g: Group) {
+    setSyncing((s) => ({ ...s, [g.id]: true }));
+    try {
+      const { data, error } = await supabase.functions.invoke("sync-participants", {
+        body: { group_id: g.id },
+      });
+      if (error) throw error;
+      const total = (data as { total_from_api?: number } | null)?.total_from_api ?? 0;
+      toast(`"${g.name}": ${total} participantes sincronizados.`, "success");
+      await reload();
+    } catch (err) {
+      toast(
+        err instanceof Error ? `Falha ao sincronizar: ${err.message}` : "Falha ao sincronizar",
+        "error"
+      );
+    } finally {
+      setSyncing((s) => ({ ...s, [g.id]: false }));
+    }
+  }
 
   return (
     <>
@@ -433,6 +473,24 @@ export function GruposPage() {
                       </>
                     )}
                   </span>
+                  <button
+                    type="button"
+                    aria-label={`Sincronizar participantes de ${g.name}`}
+                    title="Sincronizar participantes da UAZAPI"
+                    disabled={syncing[g.id]}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      void syncParticipants(g);
+                    }}
+                    className="flex h-6 w-6 items-center justify-center rounded-md text-ink-400 transition-colors hover:bg-brand-500/15 hover:text-brand-400 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {syncing[g.id] ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-3.5 w-3.5" />
+                    )}
+                  </button>
                   <button
                     type="button"
                     aria-label={`Excluir grupo ${g.name}`}
