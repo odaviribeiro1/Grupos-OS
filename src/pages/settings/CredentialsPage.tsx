@@ -129,6 +129,8 @@ function RedeployFunctionsCard() {
 function WebhookCard() {
   const url = useMemo(buildWebhookUrl, []);
   const [copied, setCopied] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ status: number; body: string } | null>(null);
 
   if (!url) return null;
 
@@ -141,6 +143,34 @@ function WebhookCard() {
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
       toast("Não foi possível copiar. Selecione o texto manualmente.", "error");
+    }
+  }
+
+  // Manda um POST pra própria URL do webhook simulando UAZAPI. Se chegar até a
+  // Edge Function, a resposta vai indicar (ex: 400 "Missing chatId", ou 200
+  // "ignored: not a group message" pra payload mínimo). Qualquer resposta
+  // exceto 401/403/404 prova que a função está reachable sem auth — então o
+  // problema está na config da UAZAPI (URL errada no painel, evento errado,
+  // webhook desabilitado).
+  async function testEndpoint() {
+    if (!url) return;
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat: { wa_chatid: "test@g.us", wa_isGroup: true },
+          message: { messageType: "text", text: "ping de teste", messageid: "test-" + Date.now() },
+        }),
+      });
+      const body = await res.text();
+      setTestResult({ status: res.status, body: body.slice(0, 400) });
+    } catch (err) {
+      setTestResult({ status: 0, body: err instanceof Error ? err.message : "Falha de rede" });
+    } finally {
+      setTesting(false);
     }
   }
 
@@ -182,7 +212,64 @@ function WebhookCard() {
             </>
           )}
         </button>
+        <button
+          type="button"
+          onClick={testEndpoint}
+          disabled={testing}
+          className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-[rgba(59,130,246,0.35)] bg-[rgba(30,58,138,0.25)] px-4 text-sm font-medium text-[#CBD5E1] transition-all duration-300 hover:bg-[rgba(30,58,138,0.4)] hover:text-[#F8FAFC] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {testing ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Testando...
+            </>
+          ) : (
+            "Testar URL"
+          )}
+        </button>
       </div>
+      {testResult && (
+        <div className="mt-3 rounded-lg border border-[rgba(59,130,246,0.15)] bg-[rgba(0,0,0,0.25)] p-3 text-[12px] leading-5">
+          <p className="mb-1 font-medium text-[#CBD5E1]">
+            Resposta:{" "}
+            <span
+              className={
+                testResult.status >= 200 && testResult.status < 400
+                  ? "text-[#10B981]"
+                  : testResult.status === 0
+                    ? "text-[#EF4444]"
+                    : "text-[#F59E0B]"
+              }
+            >
+              HTTP {testResult.status || "ERRO"}
+            </span>
+          </p>
+          <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11px] text-[#94A3B8]">
+            {testResult.body}
+          </pre>
+          <p className="mt-2 text-[11px] text-[#94A3B8]">
+            {testResult.status >= 200 && testResult.status < 400 ? (
+              <>
+                <span className="text-[#10B981]">✓</span> Endpoint reachable. Se mensagens
+                reais não chegam, o problema é a config do webhook na UAZAPI (URL,
+                evento ou habilitação).
+              </>
+            ) : testResult.status === 401 || testResult.status === 403 ? (
+              <>
+                <span className="text-[#EF4444]">✗</span> Auth bloqueada. Re-deploy a função
+                acima ou verifique se <span className="font-mono">verify_jwt: false</span> está aplicado.
+              </>
+            ) : testResult.status === 404 ? (
+              <>
+                <span className="text-[#EF4444]">✗</span> Função não encontrada — re-deploya
+                no card acima.
+              </>
+            ) : (
+              <>O endpoint respondeu; payload acima. A UAZAPI precisa estar configurada pra esta mesma URL.</>
+            )}
+          </p>
+        </div>
+      )}
     </div>
   );
 }
