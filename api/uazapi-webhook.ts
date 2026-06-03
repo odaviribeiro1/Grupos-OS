@@ -101,34 +101,44 @@ async function requireOwner(req: VercelRequest): Promise<{ ok: true } | { ok: fa
   return { ok: true };
 }
 
-// UAZAPI v2 tem 2 variações conhecidas de endpoint de webhook. Tentamos as duas.
+// POST /webhook — o endpoint canônico da UAZAPI v2 (Go/Baileys). Outros endpoints
+// como /instance/updateWebhook não existem nessa versão (retornam 405).
+// excludeMessages é []string (não objeto) — mas omitimos por completo, já que
+// fazemos a filtragem (fromMe + was_sent_by_api) na própria Edge Function.
 async function setWebhook(apiUrl: string, token: string, webhookUrl: string): Promise<{ ok: boolean; tried: Array<{ endpoint: string; status: number; body: string }> }> {
   const base = normalizeUrl(apiUrl);
-  const body = {
-    enabled: true,
-    url: webhookUrl,
-    events: ["messages", "messages_upsert", "messages.upsert"],
-    excludeMessages: { wasSentByApi: false },
-  };
-
-  const candidates = [
-    { endpoint: `${base}/webhook`, method: "POST" },
-    { endpoint: `${base}/instance/updateWebhook`, method: "POST" },
+  // Variações de event name pra cobrir nomenclaturas conhecidas da UAZAPI.
+  // Se UAZAPI rejeitar algum, tentamos a próxima combinação.
+  const eventSets: string[][] = [
+    ["messages"],
+    ["messages_upsert"],
+    ["messages", "messages_upsert"],
+    [], // fallback: vazio = todos os eventos (algumas versões aceitam)
   ];
 
+  const endpoint = `${base}/webhook`;
   const tried: Array<{ endpoint: string; status: number; body: string }> = [];
-  for (const c of candidates) {
+  for (const events of eventSets) {
+    const body = { enabled: true, url: webhookUrl, events };
     try {
-      const res = await fetch(c.endpoint, {
-        method: c.method,
+      const res = await fetch(endpoint, {
+        method: "POST",
         headers: { "Content-Type": "application/json", token },
         body: JSON.stringify(body),
       });
       const text = await res.text();
-      tried.push({ endpoint: c.endpoint, status: res.status, body: text.slice(0, 500) });
+      tried.push({
+        endpoint: `${endpoint} events=[${events.join(",")}]`,
+        status: res.status,
+        body: text.slice(0, 500),
+      });
       if (res.ok) return { ok: true, tried };
     } catch (err) {
-      tried.push({ endpoint: c.endpoint, status: 0, body: err instanceof Error ? err.message : "network" });
+      tried.push({
+        endpoint: `${endpoint} events=[${events.join(",")}]`,
+        status: 0,
+        body: err instanceof Error ? err.message : "network",
+      });
     }
   }
   return { ok: false, tried };
